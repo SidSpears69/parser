@@ -7,3 +7,4 @@ dist/
 *.spec
 artifacts/
 .idea
+web-parser-config*.json

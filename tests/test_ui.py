@@ -81,7 +81,52 @@ class InterfaceTests(unittest.TestCase):
         self.assertIn("Запуск не выполнен", self.window.statusBar().currentMessage())
         self.assertEqual(page.state_label.text(), "Не запущен")
         self.assertFalse(page.stop_button.isEnabled())
-        self.assertFalse(self.window.save_config_button.isEnabled())
+        self.assertTrue(self.window.save_config_button.isEnabled())
+
+    def test_configuration_round_trip_restores_each_tab(self):
+        first = self.window.pages[SITES[0]]
+        second = self.window.pages[SITES[1]]
+        first.source_url.setText("https://first.example/products.json")
+        first.token.setText("secret-token")
+        first.browser.setCurrentIndex(2)
+        first.pause.setValue(9)
+        first.ftp_host.setText("ftp.example.org")
+        first.ftp_port.setValue(2121)
+        first.ftp_user.setText("user-one")
+        first.ftp_password.setText("secret-password")
+        first.remote_path.setText("/first/")
+        first.schedule_enabled.setChecked(True)
+        first.start_time.setTime(first.start_time.time().fromString("08:30", "HH:mm"))
+        first.interval.setValue(4)
+        first.interval_unit.setCurrentIndex(2)
+        second.source_url.setText("https://second.example/products.json")
+        expected = {site: page.settings() for site, page in self.window.pages.items()}
+
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "saved.json"
+            self.window.save_config_to(path)
+            raw = path.read_text(encoding="utf-8")
+            self.assertNotIn("secret-token", raw)
+            self.assertNotIn("secret-password", raw)
+            for page in self.window.pages.values():
+                page.source_url.clear()
+                page.token.clear()
+                page.ftp_password.clear()
+            self.window.load_config_from(path)
+
+        self.assertEqual(
+            {site: page.settings() for site, page in self.window.pages.items()}, expected
+        )
+
+    def test_invalid_config_does_not_change_any_tab(self):
+        page = self.window.pages[SITES[0]]
+        page.source_url.setText("https://current.example/products.json")
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "invalid.json"
+            path.write_text('{"format": "wrong"}', encoding="utf-8")
+            with self.assertRaises(ValueError):
+                self.window.load_config_from(path)
+        self.assertEqual(page.source_url.text(), "https://current.example/products.json")
 
 
 if __name__ == "__main__":

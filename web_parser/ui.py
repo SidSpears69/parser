@@ -11,9 +11,11 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
+from web_parser import config
 
-SITES = ("sail-master.ru", "fishingline.ru", "petrokanat.ru", "commercial-fishing.ru")
-BROWSERS = ("Яндекс Браузер", "Google Chrome", "Microsoft Edge", "Mozilla Firefox")
+
+SITES = config.SITES
+BROWSERS = config.BROWSERS
 
 
 def label(text: str, name: str = "") -> QLabel:
@@ -184,7 +186,7 @@ class SitePage(QWidget):
         self.remote_path = field("/site/parser/", "remotePath")
         ftp_form.addRow("Сервер", connection)
         ftp_form.addRow("Логин / пароль", credentials)
-        ftp_form.addRow("Каталог JSON и фото", self.remote_path)
+        ftp_form.addRow("Каталог JSON", self.remote_path)
         ftp_layout.addLayout(ftp_form)
         grid.addWidget(ftp, 0, 1)
 
@@ -263,7 +265,7 @@ class SitePage(QWidget):
             widget.setEnabled(enabled)
 
     def settings(self) -> dict:
-        """Return only in-memory values; storage and encryption belong to later steps."""
+        """Return the settings currently shown on this site's tab."""
         return {
             "site": self.site,
             "source_url": self.source_url.text().strip(),
@@ -281,6 +283,24 @@ class SitePage(QWidget):
                 "interval": self.interval.value(), "unit": self.interval_unit.currentData(),
             },
         }
+
+    def apply_settings(self, settings: dict) -> None:
+        """Restore a validated site's settings to its controls."""
+        self.source_url.setText(settings["source_url"])
+        self.token.setText(settings["token"])
+        self.browser.setCurrentText(settings["browser"])
+        self.pause.setValue(settings["pause_seconds"])
+        ftp = settings["ftp"]
+        self.ftp_host.setText(ftp["host"])
+        self.ftp_port.setValue(ftp["port"])
+        self.ftp_user.setText(ftp["username"])
+        self.ftp_password.setText(ftp["password"])
+        self.remote_path.setText(ftp["remote_path"])
+        schedule = settings["schedule"]
+        self.schedule_enabled.setChecked(schedule["enabled"])
+        self.start_time.setTime(QTime.fromString(schedule["start_time"], "HH:mm"))
+        self.interval.setValue(schedule["interval"])
+        self.interval_unit.setCurrentIndex(self.interval_unit.findData(schedule["unit"]))
 
 
 class MainWindow(QMainWindow):
@@ -306,15 +326,16 @@ class MainWindow(QMainWindow):
         header.addWidget(label("4 сайта", "badge"))
         layout.addLayout(header)
 
-        config = QHBoxLayout()
-        config.addWidget(label("Конфигурация всех сайтов", "sectionTitle"))
-        config.addStretch()
+        config_layout = QHBoxLayout()
+        config_layout.addWidget(label("Конфигурация всех сайтов", "sectionTitle"))
+        config_layout.addStretch()
         self.load_config_button = QPushButton("Загрузить…")
         self.save_config_button = QPushButton("Сохранить…")
-        for button in (self.load_config_button, self.save_config_button):
-            button.setEnabled(False)
-            config.addWidget(button)
-        layout.addLayout(config)
+        self.load_config_button.setToolTip("Загрузить настройки всех вкладок из файла")
+        self.save_config_button.setToolTip("Сохранить настройки всех вкладок в файл")
+        config_layout.addWidget(self.load_config_button)
+        config_layout.addWidget(self.save_config_button)
+        layout.addLayout(config_layout)
 
         self.tabs = QTabWidget()
         self.tabs.setObjectName("siteTabs")
@@ -330,6 +351,42 @@ class MainWindow(QMainWindow):
             self.tabs.addTab(scroll, site)
             page.start_requested.connect(self._collection_unavailable)
         layout.addWidget(self.tabs, 1)
+        self.save_config_button.clicked.connect(self._choose_save_config)
+        self.load_config_button.clicked.connect(self._choose_load_config)
+
+    def save_config_to(self, path: str | Path) -> None:
+        config.save(path, {site: page.settings() for site, page in self.pages.items()})
+        self.statusBar().showMessage(f"Настройки сохранены в {Path(path).name}")
+
+    def load_config_from(self, path: str | Path) -> None:
+        settings_by_site = config.load(path)
+        if set(settings_by_site) != set(SITES):
+            raise ValueError("Файл должен содержать настройки всех четырёх сайтов")
+        for site in SITES:
+            self.pages[site].apply_settings(settings_by_site[site])
+        self.statusBar().showMessage(f"Настройки загружены из {Path(path).name}")
+
+    def _choose_save_config(self) -> None:
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Сохранить настройки", "web-parser-config.json", "Файлы JSON (*.json)"
+        )
+        if not path:
+            return
+        try:
+            self.save_config_to(path)
+        except (OSError, ValueError, RuntimeError) as error:
+            QMessageBox.warning(self, "Не удалось сохранить настройки", str(error))
+
+    def _choose_load_config(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Загрузить настройки", "", "Файлы JSON (*.json)"
+        )
+        if not path:
+            return
+        try:
+            self.load_config_from(path)
+        except (OSError, ValueError, RuntimeError) as error:
+            QMessageBox.warning(self, "Не удалось загрузить настройки", str(error))
 
     @Slot(str)
     def _collection_unavailable(self, site: str) -> None:
