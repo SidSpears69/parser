@@ -3,7 +3,7 @@
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QTime, Signal, Slot
+from PySide6.QtCore import Qt, QThread, QTime, QTimer, Signal, Slot
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QFileDialog, QFormLayout, QFrame, QGridLayout,
     QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit,
@@ -12,6 +12,8 @@ from PySide6.QtWidgets import (
 )
 
 from web_parser import config
+from web_parser.browser_discovery import BrowserInstallation, discover_browsers
+from web_parser.browser_session import BrowserError, BrowserSessionManager
 
 
 SITES = config.SITES
@@ -119,13 +121,37 @@ class ErrorLog(QWidget):
         self.clear_button.setEnabled(has_text)
 
 
+class BrowserLaunchThread(QThread):
+    """Run the potentially slow driver lookup and browser start off the UI thread."""
+
+    def __init__(self, manager: BrowserSessionManager, name: str, binary: Path, parent=None):
+        super().__init__(parent)
+        self.manager = manager
+        self.name = name
+        self.binary = binary
+        self.description: str | None = None
+        self.error: str | None = None
+
+    def run(self) -> None:
+        try:
+            self.description = self.manager.launch(self.name, self.binary)
+        except BrowserError as error:
+            self.error = str(error) or type(error).__name__
+
+
 class SitePage(QWidget):
     start_requested = Signal(str)
     stop_requested = Signal(str)
+    refresh_browsers_requested = Signal()
+    browser_launch_finished = Signal()
 
     def __init__(self, site: str, parent: QWidget | None = None):
         super().__init__(parent)
         self.site = site
+        self._available_browsers: dict[str, BrowserInstallation] = {}
+        self._browser_manager: BrowserSessionManager | None = None
+        self._launch_thread: BrowserLaunchThread | None = None
+        self._shutting_down = False
         self.setObjectName("sitePage")
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 16, 20, 18)
@@ -194,16 +220,37 @@ class SitePage(QWidget):
         browser_form = form()
         self.browser = QComboBox()
         self.browser.setObjectName("browser")
-        self.browser.addItems(BROWSERS)
-        self.browser.setToolTip("Список вариантов из ТЗ.")
+        for browser_name in BROWSERS:
+            self.browser.addItem(browser_name, browser_name)
+        self.browser.setToolTip("Выберите установленный браузер для проверки запуска.")
+        self.refresh_browsers_button = QPushButton("Обновить")
+        self.refresh_browsers_button.setToolTip("Повторно найти браузеры на этом компьютере")
+        browser_row = QHBoxLayout()
+        browser_row.addWidget(self.browser, 1)
+        browser_row.addWidget(self.refresh_browsers_button)
         self.pause = QSpinBox()
         self.pause.setObjectName("pauseSeconds")
         self.pause.setRange(1, 3600)
         self.pause.setValue(5)
         self.pause.setSuffix(" сек.")
-        browser_form.addRow("Браузер", self.browser)
+        browser_form.addRow("Браузер", browser_row)
         browser_form.addRow("Пауза между URL", self.pause)
         browser_layout.addLayout(browser_form)
+        self.browser_path_label = label("Установленный браузер не найден.", "hint")
+        self.browser_path_label.setWordWrap(True)
+        browser_layout.addWidget(self.browser_path_label)
+        browser_actions = QHBoxLayout()
+        self.launch_browser_button = QPushButton("Запустить браузер")
+        self.launch_browser_button.setEnabled(False)
+        self.close_browser_button = QPushButton("Закрыть браузер")
+        self.close_browser_button.setEnabled(False)
+        browser_actions.addWidget(self.launch_browser_button)
+        browser_actions.addWidget(self.close_browser_button)
+        browser_actions.addStretch()
+        browser_layout.addLayout(browser_actions)
+        self.browser_launch_status = label("Браузер не запущен.", "hint")
+        self.browser_launch_status.setWordWrap(True)
+        browser_layout.addWidget(self.browser_launch_status)
         hint = label("Браузер используется для Ozon и Яндекс Маркета. Wildberries — через JSON.", "hint")
         hint.setWordWrap(True)
         browser_layout.addWidget(hint)
@@ -247,9 +294,123 @@ class SitePage(QWidget):
         layout.addWidget(self.log, 1)
         self.start_button.clicked.connect(lambda: self.start_requested.emit(self.site))
         self.stop_button.clicked.connect(lambda: self.stop_requested.emit(self.site))
+        self.browser.currentIndexChanged.connect(self._update_browser_controls)
+        self.refresh_browsers_button.clicked.connect(lambda: self.refresh_browsers_requested.emit())
+        self.launch_browser_button.clicked.connect(self._launch_browser)
+        self.close_browser_button.clicked.connect(self._close_browser)
+
+    @property
+    def browser_launch_pending(self) -> bool:
+        """Whether launch results still need to be processed by this page."""
+        return self._launch_thread is not None
+
+    @property
+    def browser_launch_in_progress(self) -> bool:
+        """Whether the browser launch worker is still running."""
+        return self._launch_thread is not None and self._launch_thread.isRunning()
+
+    def prepare_browser_shutdown(self) -> None:
+        self._shutting_down = True
+
+    def set_available_browsers(self, available: dict[str, BrowserInstallation]) -> None:
+        """Refresh installation hints while retaining canonical config values."""
+        self._available_browsers = available.copy()
+        for index, browser_name in enumerate(BROWSERS):
+            installation = available.get(browser_name)
+            suffix = "найден" if installation else "не найден"
+            self.browser.setItemText(index, f"{browser_name} — {suffix}")
+            self.browser.setItemData(
+                index, str(installation.path) if installation else "", Qt.ItemDataRole.ToolTipRole
+            )
+        self._update_browser_controls()
+
+    def _selected_browser_name(self) -> str:
+        return str(self.browser.currentData())
+
+    def _update_browser_controls(self) -> None:
+        name = self._selected_browser_name()
+        installation = self._available_browsers.get(name)
+        path_text = f"Путь: {installation.path}" if installation else "Установленный браузер не найден."
+        self.browser_path_label.setText(path_text)
+        self.browser_path_label.setToolTip(str(installation.path) if installation else "")
+        starting = self._launch_thread is not None and self._launch_thread.isRunning()
+        running = self._browser_manager is not None and self._browser_manager.is_running
+        self.browser.setEnabled(not starting and not running)
+        self.refresh_browsers_button.setEnabled(not starting and not running)
+        self.launch_browser_button.setEnabled(installation is not None and not starting and not running)
+        self.close_browser_button.setEnabled(running and not starting)
+
+    def _launch_browser(self) -> None:
+        name = self._selected_browser_name()
+        installation = self._available_browsers.get(name)
+        if installation is None or self._launch_thread is not None:
+            return
+        self._browser_manager = BrowserSessionManager()
+        thread = BrowserLaunchThread(self._browser_manager, name, installation.path, self)
+        self._launch_thread = thread
+        self.browser_launch_status.setText(f"Запускается {name}; подбор драйвера может занять время…")
+        thread.finished.connect(self._browser_launch_finished)
+        thread.start()
+        self._update_browser_controls()
+
+    @Slot()
+    def _browser_launch_finished(self) -> None:
+        thread = self._launch_thread
+        if thread is None:
+            return
+        self._launch_thread = None
+        if self._shutting_down:
+            if self._browser_manager is not None:
+                try:
+                    self._browser_manager.close()
+                except BrowserError:
+                    pass
+            thread.deleteLater()
+            self.browser_launch_finished.emit()
+            return
+        if thread.error or thread.description is None:
+            error_message = thread.error or "Запуск прерван из-за внутренней ошибки."
+            if self._browser_manager is not None:
+                try:
+                    self._browser_manager.close()
+                except BrowserError:
+                    pass
+            self.browser_launch_status.setText(f"Не удалось запустить браузер: {error_message}")
+            self.log.append_error("", "", f"Запуск браузера: {error_message}")
+        else:
+            self.browser_launch_status.setText(f"Браузер запущен. {thread.description}")
+        self._update_browser_controls()
+        thread.deleteLater()
+        self.browser_launch_finished.emit()
+
+    def _close_browser(self) -> None:
+        if self._launch_thread is not None or self._browser_manager is None:
+            return
+        try:
+            self._browser_manager.close()
+        except BrowserError as error:
+            self.browser_launch_status.setText(f"Не удалось закрыть браузер: {error}")
+            self.log.append_error("", "", f"Закрытие браузера: {error}")
+        else:
+            self.browser_launch_status.setText("Браузер закрыт.")
+        self._update_browser_controls()
+
+    def shutdown_browser(self) -> None:
+        """Keep the worker alive until launch completes, then release its session."""
+        self.prepare_browser_shutdown()
+        if self._launch_thread is not None:
+            self._launch_thread.wait()
+        if self._browser_manager is not None:
+            try:
+                self._browser_manager.close()
+            except BrowserError:
+                pass
 
     def resizeEvent(self, event) -> None:
-        compact = self.width() < 920
+        # QScrollArea may keep the page wider than its viewport to satisfy a
+        # two-column minimum width; use the visible width to break that cycle.
+        viewport = self.parentWidget()
+        compact = (viewport.width() if viewport is not None else self.width()) < 1200
         if compact != self._compact:
             self._compact = compact
             for panel in self._panels:
@@ -270,7 +431,7 @@ class SitePage(QWidget):
             "site": self.site,
             "source_url": self.source_url.text().strip(),
             "token": self.token.text(),
-            "browser": self.browser.currentText(),
+            "browser": self._selected_browser_name(),
             "pause_seconds": self.pause.value(),
             "ftp": {
                 "host": self.ftp_host.text().strip(), "port": self.ftp_port.value(),
@@ -288,7 +449,7 @@ class SitePage(QWidget):
         """Restore a validated site's settings to its controls."""
         self.source_url.setText(settings["source_url"])
         self.token.setText(settings["token"])
-        self.browser.setCurrentText(settings["browser"])
+        self.browser.setCurrentIndex(self.browser.findData(settings["browser"]))
         self.pause.setValue(settings["pause_seconds"])
         ftp = settings["ftp"]
         self.ftp_host.setText(ftp["host"])
@@ -340,6 +501,8 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         self.tabs.setObjectName("siteTabs")
         self.tabs.setDocumentMode(True)
+        self._browsers_scanned = False
+        self._close_pending = False
         self.pages: dict[str, SitePage] = {}
         for site in SITES:
             page = SitePage(site)
@@ -350,9 +513,46 @@ class MainWindow(QMainWindow):
             scroll.setWidget(page)
             self.tabs.addTab(scroll, site)
             page.start_requested.connect(self._collection_unavailable)
+            page.refresh_browsers_requested.connect(self._refresh_browsers)
+            page.browser_launch_finished.connect(self._resume_close)
         layout.addWidget(self.tabs, 1)
         self.save_config_button.clicked.connect(self._choose_save_config)
         self.load_config_button.clicked.connect(self._choose_load_config)
+        self._refresh_browsers()
+
+    @Slot()
+    def _refresh_browsers(self) -> None:
+        available = discover_browsers()
+        for page in self.pages.values():
+            page.set_available_browsers(available)
+            if not self._browsers_scanned and available and page.settings()["browser"] not in available:
+                first_installed = next(iter(available))
+                page.browser.setCurrentIndex(page.browser.findData(first_installed))
+        self._browsers_scanned = True
+        self.statusBar().showMessage(f"Найдено браузеров: {len(available)}")
+
+    def closeEvent(self, event) -> None:
+        launching = [page for page in self.pages.values() if page.browser_launch_in_progress]
+        if launching:
+            event.ignore()
+            if not self._close_pending:
+                self._close_pending = True
+                self.statusBar().showMessage("Завершается запуск браузера перед закрытием приложения…")
+                self.setEnabled(False)
+                for page in launching:
+                    page.prepare_browser_shutdown()
+            return
+        for page in self.pages.values():
+            page.shutdown_browser()
+        super().closeEvent(event)
+
+    @Slot()
+    def _resume_close(self) -> None:
+        if self._close_pending and all(
+            not page.browser_launch_in_progress for page in self.pages.values()
+        ):
+            self._close_pending = False
+            QTimer.singleShot(0, self.close)
 
     def save_config_to(self, path: str | Path) -> None:
         config.save(path, {site: page.settings() for site, page in self.pages.items()})
@@ -374,7 +574,7 @@ class MainWindow(QMainWindow):
             return
         try:
             self.save_config_to(path)
-        except (OSError, ValueError, RuntimeError) as error:
+        except (OSError, ValueError) as error:
             QMessageBox.warning(self, "Не удалось сохранить настройки", str(error))
 
     def _choose_load_config(self) -> None:
@@ -385,7 +585,7 @@ class MainWindow(QMainWindow):
             return
         try:
             self.load_config_from(path)
-        except (OSError, ValueError, RuntimeError) as error:
+        except (OSError, ValueError) as error:
             QMessageBox.warning(self, "Не удалось загрузить настройки", str(error))
 
     @Slot(str)

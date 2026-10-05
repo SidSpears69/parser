@@ -1,1 +1,2 @@
 PySide6==6.10.3
+selenium==4.50.0
