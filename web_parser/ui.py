@@ -2,18 +2,22 @@
 
 from datetime import datetime
 from pathlib import Path
+from typing import Callable
+from urllib.parse import quote, quote_plus
 
-from PySide6.QtCore import Qt, QThread, QTime, QTimer, Signal, Slot
+from PySide6.QtCore import QPointF, Qt, QThread, QTime, QTimer, Signal, Slot
+from PySide6.QtGui import QColor, QPaintEvent, QPainter, QPen
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QFileDialog, QFormLayout, QFrame, QGridLayout,
-    QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit,
-    QPushButton, QScrollArea, QSizePolicy, QSpinBox, QTabWidget, QTimeEdit,
-    QVBoxLayout, QWidget,
+    QAbstractItemView, QCheckBox, QComboBox, QFileDialog, QFormLayout, QFrame,
+    QGridLayout, QHeaderView, QHBoxLayout, QLabel, QLineEdit, QMainWindow,
+    QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy, QSpinBox,
+    QTableWidget, QTableWidgetItem, QTabWidget, QTimeEdit, QVBoxLayout, QWidget,
 )
 
 from web_parser import config
 from web_parser.browser_discovery import BrowserInstallation, discover_browsers
 from web_parser.browser_session import BrowserError, BrowserSessionManager
+from web_parser.product_links import ProductLinks, ProductLinksError, fetch_product_links
 
 
 SITES = config.SITES
@@ -53,6 +57,49 @@ def form() -> QFormLayout:
     return layout
 
 
+def _paint_arrow_control(
+    widget: QWidget,
+    event: QPaintEvent,
+    native_paint: Callable[[QPaintEvent], None],
+    *,
+    spin: bool,
+) -> None:
+    """Paint the native control and add a visible chevron on top."""
+    native_paint(event)
+    painter = QPainter(widget)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    color = QColor("#36577f" if widget.isEnabled() else "#9aaabd")
+    painter.setPen(QPen(color, 1.8, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+    x = widget.width() - (12 if spin else 14)
+    middle = widget.height() / 2
+    if spin:
+        painter.drawPolyline((QPointF(x - 4, middle / 2 + 2), QPointF(x, middle / 2 - 2), QPointF(x + 4, middle / 2 + 2)))
+        painter.drawPolyline((QPointF(x - 4, middle + middle / 2 - 2), QPointF(x, middle + middle / 2 + 2), QPointF(x + 4, middle + middle / 2 - 2)))
+    else:
+        painter.drawPolyline((QPointF(x - 4, middle - 2), QPointF(x, middle + 2), QPointF(x + 4, middle - 2)))
+
+
+class ReadableSpinBox(QSpinBox):
+    """Spin box with visible chevrons independent of the native Qt style."""
+
+    def paintEvent(self, event) -> None:
+        _paint_arrow_control(self, event, super().paintEvent, spin=True)
+
+
+class ReadableTimeEdit(QTimeEdit):
+    """Time editor with visible chevrons independent of the native Qt style."""
+
+    def paintEvent(self, event) -> None:
+        _paint_arrow_control(self, event, super().paintEvent, spin=True)
+
+
+class ReadableComboBox(QComboBox):
+    """Combo box with a visible down chevron independent of the native Qt style."""
+
+    def paintEvent(self, event) -> None:
+        _paint_arrow_control(self, event, super().paintEvent, spin=False)
+
+
 class ErrorLog(QWidget):
     """Bounded, per-site error log. Safe to append through a queued Qt signal."""
 
@@ -70,7 +117,9 @@ class ErrorLog(QWidget):
         toolbar.addWidget(self.count_label)
         toolbar.addStretch()
         self.save_button = QPushButton("Сохранить TXT…")
+        self.save_button.setObjectName("saveLog")
         self.clear_button = QPushButton("Очистить")
+        self.clear_button.setObjectName("clearLog")
         toolbar.addWidget(self.save_button)
         toolbar.addWidget(self.clear_button)
         layout.addLayout(toolbar)
@@ -139,11 +188,35 @@ class BrowserLaunchThread(QThread):
             self.error = str(error) or type(error).__name__
 
 
+class ProductLinksFetchThread(QThread):
+    """Fetch the site's source JSON without blocking the Qt event loop."""
+
+    def __init__(self, source_url: str, token: str, parent=None):
+        super().__init__(parent)
+        self.source_url = source_url
+        self.token = token
+        self.links: list[ProductLinks] | None = None
+        self.error: str | None = None
+
+    def run(self) -> None:
+        try:
+            self.links = fetch_product_links()
+        except ProductLinksError as error:
+            message = str(error) or type(error).__name__
+            # Avoid exposing the credential even if a lower layer includes it
+            # in an error message or in an URL-encoded query parameter.
+            for secret in {self.token, quote(self.token, safe=""), quote_plus(self.token)}:
+                if secret:
+                    message = message.replace(secret, "[токен скрыт]")
+            self.error = message
+
+
 class SitePage(QWidget):
     start_requested = Signal(str)
     stop_requested = Signal(str)
     refresh_browsers_requested = Signal()
     browser_launch_finished = Signal()
+    links_fetch_finished = Signal()
 
     def __init__(self, site: str, parent: QWidget | None = None):
         super().__init__(parent)
@@ -151,6 +224,8 @@ class SitePage(QWidget):
         self._available_browsers: dict[str, BrowserInstallation] = {}
         self._browser_manager: BrowserSessionManager | None = None
         self._launch_thread: BrowserLaunchThread | None = None
+        self._links_thread: ProductLinksFetchThread | None = None
+        self._product_links: tuple[ProductLinks, ...] = ()
         self._shutting_down = False
         self.setObjectName("sitePage")
         layout = QVBoxLayout(self)
@@ -184,13 +259,23 @@ class SitePage(QWidget):
         source_hint = label("JSON со списком ID товаров и ссылками на маркетплейсы.", "hint")
         source_hint.setWordWrap(True)
         source_layout.addWidget(source_hint)
+        source_actions = QHBoxLayout()
+        self.load_links_button = QPushButton("Загрузить ссылки")
+        self.load_links_button.setObjectName("loadLinks")
+        self.load_links_button.setEnabled(False)
+        source_actions.addWidget(self.load_links_button)
+        source_actions.addStretch()
+        source_layout.addLayout(source_actions)
+        self.links_status = label("Ссылки ещё не загружены.", "hint")
+        self.links_status.setWordWrap(True)
+        source_layout.addWidget(self.links_status)
         source_layout.addStretch()
         grid.addWidget(source, 0, 0)
 
         ftp, ftp_layout = section("Выгрузка на FTP")
         ftp_form = form()
         self.ftp_host = field("ftp.example.ru", "ftpHost")
-        self.ftp_port = QSpinBox()
+        self.ftp_port = ReadableSpinBox()
         self.ftp_port.setObjectName("ftpPort")
         self.ftp_port.setRange(1, 65535)
         self.ftp_port.setValue(21)
@@ -218,17 +303,18 @@ class SitePage(QWidget):
 
         browser, browser_layout = section("Браузер и обработка")
         browser_form = form()
-        self.browser = QComboBox()
+        self.browser = ReadableComboBox()
         self.browser.setObjectName("browser")
         for browser_name in BROWSERS:
             self.browser.addItem(browser_name, browser_name)
         self.browser.setToolTip("Выберите установленный браузер для проверки запуска.")
         self.refresh_browsers_button = QPushButton("Обновить")
+        self.refresh_browsers_button.setObjectName("refreshBrowsers")
         self.refresh_browsers_button.setToolTip("Повторно найти браузеры на этом компьютере")
         browser_row = QHBoxLayout()
         browser_row.addWidget(self.browser, 1)
         browser_row.addWidget(self.refresh_browsers_button)
-        self.pause = QSpinBox()
+        self.pause = ReadableSpinBox()
         self.pause.setObjectName("pauseSeconds")
         self.pause.setRange(1, 3600)
         self.pause.setValue(5)
@@ -241,8 +327,10 @@ class SitePage(QWidget):
         browser_layout.addWidget(self.browser_path_label)
         browser_actions = QHBoxLayout()
         self.launch_browser_button = QPushButton("Запустить браузер")
+        self.launch_browser_button.setObjectName("launchBrowser")
         self.launch_browser_button.setEnabled(False)
         self.close_browser_button = QPushButton("Закрыть браузер")
+        self.close_browser_button.setObjectName("closeBrowser")
         self.close_browser_button.setEnabled(False)
         browser_actions.addWidget(self.launch_browser_button)
         browser_actions.addWidget(self.close_browser_button)
@@ -262,14 +350,14 @@ class SitePage(QWidget):
         self.schedule_enabled.setObjectName("scheduleEnabled")
         schedule_layout.addWidget(self.schedule_enabled)
         schedule_form = form()
-        self.start_time = QTimeEdit(QTime(22, 0))
+        self.start_time = ReadableTimeEdit(QTime(22, 0))
         self.start_time.setObjectName("startTime")
         self.start_time.setDisplayFormat("HH:mm")
-        self.interval = QSpinBox()
+        self.interval = ReadableSpinBox()
         self.interval.setObjectName("interval")
         self.interval.setRange(1, 999)
         self.interval.setValue(1)
-        self.interval_unit = QComboBox()
+        self.interval_unit = ReadableComboBox()
         self.interval_unit.setObjectName("intervalUnit")
         for title, value in (("часов", "hours"), ("дней", "days"), ("недель", "weeks"), ("месяцев", "months")):
             self.interval_unit.addItem(title, value)
@@ -290,6 +378,23 @@ class SitePage(QWidget):
         self._compact: bool | None = None
         layout.addLayout(grid)
 
+        links_panel, links_layout = section("Ссылки товаров")
+        self.links_preview = QTableWidget(0, 4)
+        self.links_preview.setObjectName("linksPreview")
+        self.links_preview.setHorizontalHeaderLabels(
+            ("ID", "Ozon", "Wildberries", "Яндекс Маркет")
+        )
+        self.links_preview.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.links_preview.verticalHeader().setVisible(False)
+        self.links_preview.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.links_preview.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.links_preview.setAlternatingRowColors(True)
+        self.links_preview.setMinimumHeight(160)
+        links_layout.addWidget(self.links_preview)
+        self.links_preview_hint = label("Загрузите JSON, чтобы увидеть ID и ссылки товаров.", "hint")
+        links_layout.addWidget(self.links_preview_hint)
+        layout.addWidget(links_panel)
+
         self.log = ErrorLog(site)
         layout.addWidget(self.log, 1)
         self.start_button.clicked.connect(lambda: self.start_requested.emit(self.site))
@@ -298,6 +403,114 @@ class SitePage(QWidget):
         self.refresh_browsers_button.clicked.connect(lambda: self.refresh_browsers_requested.emit())
         self.launch_browser_button.clicked.connect(self._launch_browser)
         self.close_browser_button.clicked.connect(self._close_browser)
+        self.source_url.textChanged.connect(self._clear_product_links)
+        self.token.textChanged.connect(self._clear_product_links)
+        self.load_links_button.clicked.connect(self._fetch_product_links)
+
+    @property
+    def product_links(self) -> tuple[ProductLinks, ...]:
+        """Current parsed links for this site, in source order."""
+        return self._product_links
+
+    @property
+    def links_fetch_in_progress(self) -> bool:
+        return self._links_thread is not None and self._links_thread.isRunning()
+
+    @property
+    def links_fetch_pending(self) -> bool:
+        return self._links_thread is not None
+
+    def _clear_product_links(self) -> None:
+        if self._links_thread is None:
+            self._product_links = ()
+            self.links_preview.setRowCount(0)
+            self.links_status.setText("Ссылки ещё не загружены.")
+            self.links_preview_hint.setText("Загрузите JSON, чтобы увидеть ID и ссылки товаров.")
+        self._update_links_controls()
+
+    def _update_links_controls(self) -> None:
+        fetching = self._links_thread is not None
+        self.source_url.setEnabled(not fetching)
+        self.token.setEnabled(not fetching)
+        self.load_links_button.setEnabled(
+            bool(self.source_url.text().strip() and self.token.text())
+            and not fetching and not self._shutting_down
+        )
+
+    def _fetch_product_links(self) -> None:
+        if self._links_thread is not None:
+            return
+        source_url = self.source_url.text().strip()
+        token = self.token.text()
+        if not source_url or not token:
+            return
+        self._product_links = ()
+        self.links_preview.setRowCount(0)
+        self.links_preview_hint.setText("Ожидание ответа источника…")
+        self.links_status.setText("Загрузка JSON и разбор ссылок…")
+        thread = ProductLinksFetchThread(source_url, token, self)
+        self._links_thread = thread
+        thread.finished.connect(self._product_links_fetched)
+        thread.start()
+        self._update_links_controls()
+
+    @Slot()
+    def _product_links_fetched(self) -> None:
+        thread = self._links_thread
+        if thread is None:
+            return
+        self._links_thread = None
+        if self._shutting_down:
+            thread.token = ""
+            thread.deleteLater()
+            self.links_fetch_finished.emit()
+            return
+        source_changed = (
+            self.source_url.text().strip() != thread.source_url
+            or self.token.text() != thread.token
+        )
+        if source_changed:
+            self.links_status.setText("Источник или токен изменились во время загрузки. Загрузите ссылки снова.")
+            self.links_preview_hint.setText("Данные прежнего источника отброшены.")
+        elif thread.error is not None or thread.links is None:
+            message = thread.error or "Загрузка прервана из-за внутренней ошибки."
+            self.links_status.setText(f"Не удалось загрузить ссылки: {message}")
+            self.links_preview_hint.setText("Проверьте URL и токен доступа.")
+            self.log.append_error("", "", f"Сбор ссылок: {message}")
+        else:
+            self._product_links = tuple(thread.links)
+            self._show_product_links()
+        self._update_links_controls()
+        thread.token = ""
+        thread.deleteLater()
+        self.links_fetch_finished.emit()
+
+    def _show_product_links(self) -> None:
+        total = len(self._product_links)
+        shown = min(total, 20)
+        self.links_preview.setRowCount(shown)
+        for row, links in enumerate(self._product_links[:shown]):
+            values = (
+                links.product_id, links.ozon_url, links.wildberries_url,
+                links.yandex_market_url,
+            )
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(value or "—")
+                if value:
+                    item.setToolTip(value)
+                self.links_preview.setItem(row, column, item)
+        self.links_status.setText(f"Загружено товаров: {total}")
+        self.links_preview_hint.setText(
+            f"Показаны первые {shown} из {total} товаров." if total > shown
+            else "Все загруженные товары показаны в таблице." if total
+            else "В источнике нет товаров."
+        )
+
+    def shutdown_links(self) -> None:
+        """Release a completed fetch worker when the window closes."""
+        self._shutting_down = True
+        if self._links_thread is not None:
+            self._links_thread.wait()
 
     @property
     def browser_launch_pending(self) -> bool:
@@ -491,7 +704,9 @@ class MainWindow(QMainWindow):
         config_layout.addWidget(label("Конфигурация всех сайтов", "sectionTitle"))
         config_layout.addStretch()
         self.load_config_button = QPushButton("Загрузить…")
+        self.load_config_button.setObjectName("loadConfig")
         self.save_config_button = QPushButton("Сохранить…")
+        self.save_config_button.setObjectName("saveConfig")
         self.load_config_button.setToolTip("Загрузить настройки всех вкладок из файла")
         self.save_config_button.setToolTip("Сохранить настройки всех вкладок в файл")
         config_layout.addWidget(self.load_config_button)
@@ -515,6 +730,7 @@ class MainWindow(QMainWindow):
             page.start_requested.connect(self._collection_unavailable)
             page.refresh_browsers_requested.connect(self._refresh_browsers)
             page.browser_launch_finished.connect(self._resume_close)
+            page.links_fetch_finished.connect(self._resume_close)
         layout.addWidget(self.tabs, 1)
         self.save_config_button.clicked.connect(self._choose_save_config)
         self.load_config_button.clicked.connect(self._choose_load_config)
@@ -532,24 +748,29 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Найдено браузеров: {len(available)}")
 
     def closeEvent(self, event) -> None:
-        launching = [page for page in self.pages.values() if page.browser_launch_in_progress]
-        if launching:
+        busy = [
+            page for page in self.pages.values()
+            if page.browser_launch_pending or page.links_fetch_pending
+        ]
+        if busy:
             event.ignore()
             if not self._close_pending:
                 self._close_pending = True
-                self.statusBar().showMessage("Завершается запуск браузера перед закрытием приложения…")
+                self.statusBar().showMessage("Завершаются фоновые операции перед закрытием приложения…")
                 self.setEnabled(False)
-                for page in launching:
+                for page in self.pages.values():
                     page.prepare_browser_shutdown()
             return
         for page in self.pages.values():
             page.shutdown_browser()
+            page.shutdown_links()
         super().closeEvent(event)
 
     @Slot()
     def _resume_close(self) -> None:
         if self._close_pending and all(
-            not page.browser_launch_in_progress for page in self.pages.values()
+            not page.browser_launch_pending and not page.links_fetch_pending
+            for page in self.pages.values()
         ):
             self._close_pending = False
             QTimer.singleShot(0, self.close)

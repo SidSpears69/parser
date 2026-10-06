@@ -17,6 +17,7 @@ from PySide6.QtWidgets import QLineEdit
 from web_parser.app import create_application
 from web_parser.browser_discovery import BrowserInstallation
 from web_parser.browser_session import BrowserError
+from web_parser.product_links import ProductLinks, ProductLinksError
 from web_parser.ui import MainWindow, SITES
 
 
@@ -32,6 +33,20 @@ class InterfaceTests(unittest.TestCase):
         self.window.close()
         self.window.deleteLater()
         self.app.processEvents()
+
+    def _close_window_while_worker_runs(self, start_worker, release: Event) -> None:
+        """The window stays responsive until a background worker finishes."""
+        self.window.show()
+        start_worker()
+        started = time.monotonic()
+        self.window.close()
+        self.assertLess(time.monotonic() - started, 0.5)
+        self.assertTrue(self.window.isVisible())
+        release.set()
+        deadline = time.monotonic() + 4
+        while self.window.isVisible() and time.monotonic() < deadline:
+            QTest.qWait(10)
+        self.assertFalse(self.window.isVisible())
 
     def test_tabs_keep_independent_values(self):
         self.assertEqual(self.window.tabs.count(), 4)
@@ -147,6 +162,112 @@ class InterfaceTests(unittest.TestCase):
             self.assertTrue(page.launch_browser_button.isEnabled())
             self.assertEqual(page.settings()["browser"], "Google Chrome")
 
+    def test_product_links_load_is_per_site_and_shows_preview(self):
+        first, second = (self.window.pages[site] for site in SITES[:2])
+        self.assertFalse(first.load_links_button.isEnabled())
+        first.source_url.setText("https://example.org/products.json")
+        first.token.setText("private-token")
+        self.assertTrue(first.load_links_button.isEnabled())
+        expected = [
+            ProductLinks(
+                product_id=str(index),
+                ozon_url=f"https://ozon.ru/product/{index}",
+                wildberries_url=f"https://wildberries.ru/catalog/{index}/detail.aspx",
+                yandex_market_url=f"https://market.yandex.ru/product/{index}",
+            )
+            for index in range(21)
+        ]
+        with patch("web_parser.ui.fetch_product_links", return_value=expected) as fetch:
+            first.load_links_button.click()
+            deadline = time.monotonic() + 3
+            while first.links_fetch_pending and time.monotonic() < deadline:
+                QTest.qWait(10)
+
+        fetch.assert_called_once_with("https://example.org/products.json", "private-token")
+        self.assertEqual(first.product_links, tuple(expected))
+        self.assertEqual(second.product_links, ())
+        self.assertEqual(first.links_preview.rowCount(), 20)
+        def cell_text(column: int) -> str:
+            item = first.links_preview.item(0, column)
+            if item is None:
+                self.fail(f"Нет ячейки в колонке {column}")
+            return item.text()
+
+        self.assertEqual(cell_text(0), "0")
+        self.assertEqual(cell_text(1), "https://ozon.ru/product/0")
+        self.assertEqual(cell_text(2), "https://wildberries.ru/catalog/0/detail.aspx")
+        self.assertEqual(cell_text(3), "https://market.yandex.ru/product/0")
+        self.assertIn("21", first.links_status.text())
+        self.assertIn("первые 20 из 21", first.links_preview_hint.text())
+        self.assertIn("не загружены", second.links_status.text())
+        first.source_url.setText("https://new.example.org/products.json")
+        self.assertEqual(first.product_links, ())
+        self.assertEqual(first.links_preview.rowCount(), 0)
+
+    def test_product_links_error_hides_token_and_is_logged(self):
+        page = self.window.pages[SITES[0]]
+        page.source_url.setText("https://example.org/products.json")
+        page.token.setText("secret token+")
+        with patch(
+            "web_parser.ui.fetch_product_links",
+            side_effect=ProductLinksError("Отказано для secret token+ / secret%20token%2B"),
+        ):
+            page.load_links_button.click()
+            deadline = time.monotonic() + 3
+            while page.links_fetch_pending and time.monotonic() < deadline:
+                QTest.qWait(10)
+
+        self.assertEqual(page.product_links, ())
+        self.assertIn("Не удалось загрузить", page.links_status.text())
+        combined = page.links_status.text() + page.log.editor.toPlainText()
+        self.assertNotIn("secret token+", combined)
+        self.assertNotIn("secret%20token%2B", combined)
+        self.assertIn("[токен скрыт]", combined)
+        self.assertTrue(page.load_links_button.isEnabled())
+
+    def test_product_links_from_previous_source_are_discarded(self):
+        page = self.window.pages[SITES[0]]
+        page.source_url.setText("https://old.example.org/products.json")
+        page.token.setText("old-token")
+        release = Event()
+
+        def slow_fetch(_source_url, _token):
+            release.wait(3)
+            return [ProductLinks(
+                "42", "https://ozon.ru/search?q=42",
+                "https://wildberries.ru/search?q=42",
+                "https://market.yandex.ru/search?q=42",
+            )]
+
+        with patch("web_parser.ui.fetch_product_links", side_effect=slow_fetch):
+            page.load_links_button.click()
+            page.source_url.setText("https://new.example.org/products.json")
+            release.set()
+            deadline = time.monotonic() + 4
+            while page.links_fetch_pending and time.monotonic() < deadline:
+                QTest.qWait(10)
+
+        self.assertEqual(page.product_links, ())
+        self.assertEqual(page.links_preview.rowCount(), 0)
+        self.assertIn("изменились", page.links_status.text())
+
+    def test_window_close_waits_for_product_links_fetch_without_blocking_ui(self):
+        page = self.window.pages[SITES[0]]
+        page.source_url.setText("https://example.org/products.json")
+        page.token.setText("private-token")
+        release = Event()
+
+        def slow_fetch(_source_url, _token):
+            release.wait(3)
+            return [ProductLinks(
+                "42", "https://ozon.ru/product/42",
+                "https://wildberries.ru/catalog/42/detail.aspx",
+                "https://market.yandex.ru/product/42",
+            )]
+
+        with patch("web_parser.ui.fetch_product_links", side_effect=slow_fetch):
+            self._close_window_while_worker_runs(page.load_links_button.click, release)
+
     def test_browser_launch_and_close_uses_selected_binary(self):
         chrome = BrowserInstallation("Google Chrome", Path("C:/Browsers/Chrome/chrome.exe"))
         page = self.window.pages[SITES[0]]
@@ -233,19 +354,8 @@ class InterfaceTests(unittest.TestCase):
                 self.closed = True
 
         slow_manager = SlowManager()
-        self.window.show()
         with patch("web_parser.ui.BrowserSessionManager", return_value=slow_manager):
-            page.launch_browser_button.click()
-            started = time.monotonic()
-            self.window.close()
-            self.assertLess(time.monotonic() - started, 0.5)
-            self.assertTrue(self.window.isVisible())
-            release.set()
-            deadline = time.monotonic() + 4
-            while self.window.isVisible() and time.monotonic() < deadline:
-                QTest.qWait(10)
-
-        self.assertFalse(self.window.isVisible())
+            self._close_window_while_worker_runs(page.launch_browser_button.click, release)
         self.assertTrue(slow_manager.closed)
 
 
