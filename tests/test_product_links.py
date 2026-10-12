@@ -26,6 +26,45 @@ def product(product_id: int | str = 42):
 
 
 class ProductLinksTests(unittest.TestCase):
+    def test_parses_grouped_marketplaces_feed(self):
+        document = {
+            "1473": [{
+                "id": 1473,
+                "name": "Пример товара",
+                "url": "https://site.example/product/1473",
+                "marketplaces": {
+                    "ozon": "https://www.ozon.ru/search/?text=rope",
+                    "wildberries": "https://www.wildberries.ru/catalog/0/search.aspx?search=rope",
+                    "yandex_market": "https://market.yandex.ru/search?text=rope",
+                    "megamarket": None,
+                },
+            }],
+        }
+        links = product_links.parse_product_links(document, product_links.MARKETPLACE_FEED_FIELDS)
+        self.assertEqual(links, [product_links.ProductLinks(
+            "1473",
+            document["1473"][0]["marketplaces"]["ozon"],
+            document["1473"][0]["marketplaces"]["wildberries"],
+            document["1473"][0]["marketplaces"]["yandex_market"],
+        )])
+
+    def test_grouped_feed_rejects_missing_marketplaces(self):
+        with self.assertRaisesRegex(product_links.ProductLinksError, "marketplaces"):
+            product_links.parse_product_links({"1473": [{"id": 1473}]}, product_links.MARKETPLACE_FEED_FIELDS)
+
+    def test_fetch_uses_bearer_header_and_parses_feed(self):
+        feed = {"42": [{"id": 42, "marketplaces": {
+            "ozon": "https://ozon.ru/search?q=42",
+            "wildberries": "https://wildberries.ru/search?q=42",
+            "yandex_market": "https://market.yandex.ru/search?q=42",
+        }}]}
+        with patch.object(product_links, "download_json", return_value=feed) as download:
+            links = product_links.fetch_product_links("https://site.example/feed.json", " secret ")
+        download.assert_called_once_with("https://site.example/feed.json", {
+            "Authorization": "Bearer secret", "Accept": "application/json",
+        })
+        self.assertEqual([item.product_id for item in links], ["42"])
+
     def test_parses_id_and_three_urls_in_feed_order(self):
         records = [product(42), product(" 43 ")]
         result = product_links.parse_product_links({"products": records}, FIELDS)

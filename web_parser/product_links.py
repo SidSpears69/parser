@@ -28,13 +28,26 @@ class ProductLinks:
 
 @dataclass(frozen=True, slots=True)
 class ProductLinkFields:
-    """Names supplied by the site's JSON contract, without guessing aliases."""
+    """Names and nesting supplied by the site's JSON contract."""
 
     items_key: str | None
     product_id_key: str
     ozon_key: str
     wildberries_key: str
     yandex_market_key: str
+    marketplaces_key: str | None = None
+    grouped_by_product_id: bool = False
+
+
+MARKETPLACE_FEED_FIELDS = ProductLinkFields(
+    items_key=None,
+    product_id_key="id",
+    ozon_key="ozon",
+    wildberries_key="wildberries",
+    yandex_market_key="yandex_market",
+    marketplaces_key="marketplaces",
+    grouped_by_product_id=True,
+)
 
 
 def _http_url(value: object, location: str) -> str:
@@ -56,11 +69,20 @@ def _http_url(value: object, location: str) -> str:
 
 def parse_product_links(document: object, fields: ProductLinkFields) -> list[ProductLinks]:
     """Validate every record and preserve the feed order for later parsing."""
-    records = document
-    if fields.items_key is not None:
+    if fields.grouped_by_product_id:
+        if not isinstance(document, dict):
+            raise ProductLinksError("Список товаров в JSON должен быть объектом с массивами по ID.")
+        records = []
+        for group_id, group in document.items():
+            if not isinstance(group, list):
+                raise ProductLinksError(f"Товар {group_id}: ожидается массив записей.")
+            records.extend(group)
+    elif fields.items_key is not None:
         if not isinstance(document, dict) or fields.items_key not in document:
             raise ProductLinksError(f"В JSON отсутствует массив «{fields.items_key}».")
         records = document[fields.items_key]
+    else:
+        records = document
     if not isinstance(records, list):
         raise ProductLinksError("Список товаров в JSON должен быть массивом.")
 
@@ -78,11 +100,18 @@ def parse_product_links(document: object, fields: ProductLinkFields) -> list[Pro
         if product_id in seen_ids:
             raise ProductLinksError(f"Товар №{index}: повторяющийся ID {product_id}.")
         seen_ids.add(product_id)
+        if fields.marketplaces_key is None:
+            marketplaces = record
+        else:
+            nested_marketplaces = record.get(fields.marketplaces_key)
+            if not isinstance(nested_marketplaces, dict):
+                raise ProductLinksError(f"Товар {product_id}: отсутствует объект «{fields.marketplaces_key}».")
+            marketplaces = nested_marketplaces
         links.append(ProductLinks(
             product_id=product_id,
-            ozon_url=_http_url(record.get(fields.ozon_key), f"Товар {product_id}, OZON"),
-            wildberries_url=_http_url(record.get(fields.wildberries_key), f"Товар {product_id}, Wildberries"),
-            yandex_market_url=_http_url(record.get(fields.yandex_market_key), f"Товар {product_id}, Яндекс Маркет"),
+            ozon_url=_http_url(marketplaces.get(fields.ozon_key), f"Товар {product_id}, OZON"),
+            wildberries_url=_http_url(marketplaces.get(fields.wildberries_key), f"Товар {product_id}, Wildberries"),
+            yandex_market_url=_http_url(marketplaces.get(fields.yandex_market_key), f"Товар {product_id}, Яндекс Маркет"),
         ))
     return links
 
@@ -126,6 +155,10 @@ def download_json(source_url: str, headers: Mapping[str, str]) -> object:
         raise ProductLinksError("Источник вернул некорректный JSON в кодировке UTF-8.") from error
 
 
-def fetch_product_links() -> list[ProductLinks]:
-    """Load a site feed after its JSON field names and token method are confirmed."""
-    raise ProductLinksError("Формат JSON и способ передачи токена ещё не заданы для источника.")
+def fetch_product_links(source_url: str, token: str) -> list[ProductLinks]:
+    """Load the marketplace feed using the site's Bearer token."""
+    token = token.strip()
+    if not token or any(character.isspace() for character in token):
+        raise ProductLinksError("Укажите корректный токен доступа.")
+    document = download_json(source_url, {"Authorization": f"Bearer {token}", "Accept": "application/json"})
+    return parse_product_links(document, MARKETPLACE_FEED_FIELDS)

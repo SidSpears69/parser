@@ -200,7 +200,7 @@ class ProductLinksFetchThread(QThread):
 
     def run(self) -> None:
         try:
-            self.links = fetch_product_links()
+            self.links = fetch_product_links(self.source_url, self.token)
         except ProductLinksError as error:
             message = str(error) or type(error).__name__
             # Avoid exposing the credential even if a lower layer includes it

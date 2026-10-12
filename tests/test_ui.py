@@ -164,6 +164,8 @@ class InterfaceTests(unittest.TestCase):
 
     def test_product_links_load_is_per_site_and_shows_preview(self):
         first, second = (self.window.pages[site] for site in SITES[:2])
+        self.assertEqual(first.source_url.text(), "")
+        self.assertEqual(second.source_url.text(), "")
         self.assertFalse(first.load_links_button.isEnabled())
         first.source_url.setText("https://example.org/products.json")
         first.token.setText("private-token")
