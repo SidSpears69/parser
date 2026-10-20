@@ -27,13 +27,16 @@ class ConfigError(ValueError):
 
 
 class _DataBlob(ctypes.Structure):
-    _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_ubyte))]
+    _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.c_void_p)]
 
 
-def _require_fields(value: object, names: set[str], location: str) -> dict:
+def _require_fields(
+    value: object, names: set[str], location: str, *, optional: tuple[str, ...] = (),
+) -> dict:
     if not isinstance(value, dict):
         raise ConfigError(f"{location}: ожидался объект JSON.")
-    if set(value) != names:
+    fields = set(value)
+    if not names <= fields or fields - names - set(optional):
         raise ConfigError(f"{location}: неверный набор полей.")
     return value
 
@@ -56,11 +59,15 @@ def _validate_site(value: object, site: str) -> dict:
         value,
         {"site", "source_url", "token", "browser", "pause_seconds", "ftp", "schedule"},
         location,
+        optional=("source_schedule_enabled",),
     )
     if settings["site"] != site:
         raise ConfigError(f"{location}: имя сайта не совпадает с вкладкой.")
     source_url = _string(settings["source_url"], f"{location}, URL списка товаров")
     token = _string(settings["token"], f"{location}, токен")
+    source_schedule_enabled = settings.get("source_schedule_enabled", False)
+    if type(source_schedule_enabled) is not bool:
+        raise ConfigError(f"{location}: признак расписания источника должен быть логическим.")
     browser = _string(settings["browser"], f"{location}, браузер")
     if browser not in BROWSERS:
         raise ConfigError(f"{location}: неизвестный браузер.")
@@ -97,6 +104,7 @@ def _validate_site(value: object, site: str) -> dict:
         "site": site,
         "source_url": source_url,
         "token": token,
+        "source_schedule_enabled": source_schedule_enabled,
         "browser": browser,
         "pause_seconds": pause_seconds,
         "ftp": checked_ftp,
@@ -129,8 +137,8 @@ def _dpapi(data: bytes, *, decrypt: bool) -> bytes:
     kernel32.LocalFree.argtypes = [ctypes.c_void_p]
     kernel32.LocalFree.restype = ctypes.c_void_p
 
-    input_buffer = (ctypes.c_ubyte * len(data)).from_buffer_copy(data)
-    input_blob = _DataBlob(len(data), input_buffer)
+    input_buffer = ctypes.create_string_buffer(data, len(data))
+    input_blob = _DataBlob(len(data), ctypes.addressof(input_buffer))
     output_blob = _DataBlob()
     if not function(ctypes.byref(input_blob), None, None, None, None,
                     _DPAPI_NO_UI, ctypes.byref(output_blob)):
@@ -212,6 +220,7 @@ def load(path: str | Path) -> dict[str, dict]:
             encrypted_sites[site],
             {"site", "source_url", "token", "browser", "pause_seconds", "ftp", "schedule"},
             f"Настройки {site}",
+            optional=("source_schedule_enabled",),
         )
         ftp = _require_fields(
             encrypted["ftp"], {"host", "port", "username", "password", "remote_path"},

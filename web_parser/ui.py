@@ -327,6 +327,9 @@ class SitePage(QWidget):
         source_form.addRow("URL списка товаров", self.source_url)
         source_form.addRow("Токен доступа", self.token)
         source_layout.addLayout(source_form)
+        self.source_schedule_enabled = QCheckBox("По расписанию")
+        self.source_schedule_enabled.setObjectName("sourceScheduleEnabled")
+        source_layout.addWidget(self.source_schedule_enabled)
         source_hint = label("JSON со списком ID товаров и ссылками на маркетплейсы.", "hint")
         source_hint.setWordWrap(True)
         source_layout.addWidget(source_hint)
@@ -751,6 +754,7 @@ class SitePage(QWidget):
             "site": self.site,
             "source_url": self.source_url.text().strip(),
             "token": self.token.text(),
+            "source_schedule_enabled": self.source_schedule_enabled.isChecked(),
             "browser": self._selected_browser_name(),
             "pause_seconds": self.pause.value(),
             "ftp": {
@@ -769,6 +773,7 @@ class SitePage(QWidget):
         """Restore a validated site's settings to its controls."""
         self.source_url.setText(settings["source_url"])
         self.token.setText(settings["token"])
+        self.source_schedule_enabled.setChecked(settings.get("source_schedule_enabled", False))
         self.browser.setCurrentIndex(self.browser.findData(settings["browser"]))
         self.pause.setValue(settings["pause_seconds"])
         ftp = settings["ftp"]

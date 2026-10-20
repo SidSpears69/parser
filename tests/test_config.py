@@ -16,6 +16,7 @@ def sample_sites() -> dict[str, dict]:
             "site": site,
             "source_url": f"https://{site}/products.json",
             "token": f"secret-token-{index}-пароль",
+            "source_schedule_enabled": index % 2 == 0,
             "browser": config.BROWSERS[index],
             "pause_seconds": index + 1,
             "ftp": {
@@ -76,6 +77,22 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaises(config.ConfigError):
             config.save(self.path, sites)
         self.assertEqual(self.path.read_text(encoding="utf-8"), "existing configuration")
+
+    @unittest.skipUnless(os.name == "nt", "Windows DPAPI required")
+    def test_old_config_without_source_schedule_loads_with_disabled_default(self):
+        config.save(self.path, sample_sites())
+        saved = json.loads(self.path.read_text(encoding="utf-8"))
+        for settings in saved["sites"].values():
+            del settings["source_schedule_enabled"]
+        self.path.write_text(json.dumps(saved), encoding="utf-8")
+        loaded = config.load(self.path)
+        self.assertTrue(all(not settings["source_schedule_enabled"] for settings in loaded.values()))
+
+    def test_invalid_source_schedule_value_is_rejected(self):
+        sites = sample_sites()
+        sites[config.SITES[0]]["source_schedule_enabled"] = "yes"
+        with self.assertRaisesRegex(config.ConfigError, "расписания источника"):
+            config.save(self.path, sites)
 
     @unittest.skipUnless(os.name == "nt", "Windows DPAPI required")
     def test_failed_replace_preserves_old_file_and_cleans_temp(self):

@@ -113,16 +113,23 @@ class InterfaceTests(unittest.TestCase):
         first, second = (self.window.pages[site] for site in SITES[:2])
         first.source_url.setText("https://example.org/data.json")
         first.ftp_port.setValue(2121)
+        first.source_schedule_enabled.setChecked(True)
         self.window.tabs.setCurrentIndex(1)
         second.source_url.setText("https://other.example.org/data.json")
         self.window.tabs.setCurrentIndex(0)
         self.assertEqual(first.settings()["source_url"], "https://example.org/data.json")
         self.assertEqual(first.settings()["ftp"]["port"], 2121)
         self.assertEqual(second.settings()["ftp"]["port"], 21)
+        self.assertTrue(first.settings()["source_schedule_enabled"])
+        self.assertFalse(second.settings()["source_schedule_enabled"])
         self.assertNotEqual(first.settings()["source_url"], second.settings()["source_url"])
 
     def test_schedule_toggle_and_secret_fields(self):
         page = self.window.pages[SITES[0]]
+        self.assertFalse(page.start_time.isEnabled())
+        self.assertFalse(page.source_schedule_enabled.isChecked())
+        page.source_schedule_enabled.setChecked(True)
+        self.assertTrue(page.settings()["source_schedule_enabled"])
         self.assertFalse(page.start_time.isEnabled())
         page.schedule_enabled.setChecked(True)
         self.assertTrue(page.start_time.isEnabled())
@@ -169,6 +176,7 @@ class InterfaceTests(unittest.TestCase):
         second = self.window.pages[SITES[1]]
         first.source_url.setText("https://first.example/products.json")
         first.token.setText("secret-token")
+        first.source_schedule_enabled.setChecked(True)
         first.browser.setCurrentIndex(2)
         first.pause.setValue(9)
         first.ftp_host.setText("ftp.example.org")
@@ -193,6 +201,7 @@ class InterfaceTests(unittest.TestCase):
                 page.source_url.clear()
                 page.token.clear()
                 page.ftp_password.clear()
+                page.source_schedule_enabled.setChecked(False)
             self.window.load_config_from(path)
 
         self.assertEqual(
