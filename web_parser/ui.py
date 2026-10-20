@@ -6,13 +6,14 @@ from threading import Event
 from typing import Callable
 from urllib.parse import quote, quote_plus
 
-from PySide6.QtCore import QPointF, Qt, QThread, QTime, QTimer, QUrl, Signal, Slot
-from PySide6.QtGui import QColor, QDesktopServices, QPaintEvent, QPainter, QPen
+from PySide6.QtCore import QEvent, QObject, QPointF, Qt, QThread, QTime, QTimer, QUrl, Signal, Slot
+from PySide6.QtGui import QBrush, QColor, QDesktopServices, QPaintEvent, QPainter, QPalette, QPen
 from PySide6.QtWidgets import (
-    QAbstractItemView, QCheckBox, QComboBox, QFileDialog, QFormLayout, QFrame,
+    QAbstractButton, QAbstractItemView, QCheckBox, QComboBox, QFileDialog, QFormLayout, QFrame,
     QGridLayout, QHeaderView, QHBoxLayout, QLabel, QLineEdit, QMainWindow,
     QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy, QSpinBox,
-    QTableWidget, QTableWidgetItem, QTabWidget, QTimeEdit, QVBoxLayout, QWidget,
+    QStyle, QStyledItemDelegate, QStyleOptionViewItem, QTableWidget, QTableWidgetItem,
+    QTabWidget, QTimeEdit, QVBoxLayout, QWidget,
 )
 
 from web_parser import config
@@ -102,6 +103,20 @@ class ReadableComboBox(QComboBox):
 
     def paintEvent(self, event) -> None:
         _paint_arrow_control(self, event, super().paintEvent, spin=False)
+
+
+class ClickableCursorFilter(QObject):
+    """Show a hand only while an interactive control is enabled."""
+
+    @staticmethod
+    def update_cursor(widget: QWidget) -> None:
+        shape = Qt.CursorShape.PointingHandCursor if widget.isEnabled() else Qt.CursorShape.ArrowCursor
+        widget.setCursor(shape)
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        if event.type() == QEvent.Type.EnabledChange and isinstance(watched, QWidget):
+            self.update_cursor(watched)
+        return False
 
 
 class ErrorLog(QWidget):
@@ -283,22 +298,89 @@ class ProductLinksFetchThread(QThread):
             self.error = message
 
 
+class LinksPreviewDelegate(QStyledItemDelegate):
+    """Preserve link hover colors when the row is selected."""
+
+    def __init__(self, table: "LinksPreviewTable"):
+        super().__init__(table)
+        self.table = table
+
+    def paint(self, painter, option, index) -> None:
+        if (self.table.hovered_link == (index.row(), index.column())
+                and option.state & QStyle.StateFlag.State_Selected):
+            option = QStyleOptionViewItem(option)
+            option.palette.setColor(QPalette.ColorRole.Highlight, QColor("#c8dcff"))
+            option.palette.setColor(QPalette.ColorRole.HighlightedText, QColor("#1b50b6"))
+        super().paint(painter, option, index)
+
+
 class LinksPreviewTable(QTableWidget):
-    """Give IDs one quarter of their former equal-width column."""
+    """Keep IDs compact and give clickable links a distinct hover state."""
+
+    _LINK_COLOR = QColor("#245fd2")
+    _LINK_HOVER_COLOR = QColor("#1b50b6")
+    _LINK_HOVER_BACKGROUND = QBrush(QColor("#e8f0ff"))
 
     def __init__(self):
         super().__init__(0, 4)
+        self._hovered_link: tuple[int, int] | None = None
+        self.setItemDelegate(LinksPreviewDelegate(self))
+        self.setMouseTracking(True)
         header = self.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
         for column in range(1, 4):
             header.setSectionResizeMode(column, QHeaderView.ResizeMode.Stretch)
         self.setColumnWidth(0, 64)
 
+    @property
+    def hovered_link(self) -> tuple[int, int] | None:
+        return self._hovered_link
+
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         width = max(40, self.viewport().width() // 16)
         if self.columnWidth(0) != width:
             self.setColumnWidth(0, width)
+
+    def mouseMoveEvent(self, event) -> None:
+        index = self.indexAt(event.position().toPoint())
+        item = self.itemFromIndex(index) if index.isValid() else None
+        link = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+        hovered = (index.row(), index.column()) if isinstance(link, str) else None
+        self._set_hovered_link(hovered)
+        shape = Qt.CursorShape.PointingHandCursor if hovered is not None else Qt.CursorShape.ArrowCursor
+        self.viewport().setCursor(shape)
+        super().mouseMoveEvent(event)
+
+    def viewportEvent(self, event) -> bool:
+        if event.type() == QEvent.Type.Leave:
+            self.reset_link_hover()
+        return super().viewportEvent(event)
+
+    def reset_link_hover(self) -> None:
+        self._set_hovered_link(None)
+        self.viewport().unsetCursor()
+
+    def _set_hovered_link(self, hovered: tuple[int, int] | None) -> None:
+        if hovered == self._hovered_link:
+            return
+        if self._hovered_link is not None:
+            item = self.item(*self._hovered_link)
+            if item is not None:
+                item.setData(Qt.ItemDataRole.BackgroundRole, None)
+                item.setForeground(self._LINK_COLOR)
+                font = item.font()
+                font.setUnderline(False)
+                item.setFont(font)
+        self._hovered_link = hovered
+        if hovered is not None:
+            item = self.item(*hovered)
+            if item is not None:
+                item.setBackground(self._LINK_HOVER_BACKGROUND)
+                item.setForeground(self._LINK_HOVER_COLOR)
+                font = item.font()
+                font.setUnderline(True)
+                item.setFont(font)
 
 
 class SitePage(QWidget):
@@ -505,6 +587,7 @@ class SitePage(QWidget):
     def _clear_product_links(self) -> None:
         if self._links_thread is None:
             self._product_links = ()
+            self.links_preview.reset_link_hover()
             self.links_preview.setRowCount(0)
             self.links_status.setText("Ссылки ещё не загружены.")
             self.links_preview_hint.setText("Загрузите JSON, чтобы увидеть ID и ссылки товаров.")
@@ -532,6 +615,7 @@ class SitePage(QWidget):
         if not source_url or not token:
             return
         self._product_links = ()
+        self.links_preview.reset_link_hover()
         self.links_preview.setRowCount(0)
         self._update_browser_controls()
         self.links_preview_hint.setText("Ожидание ответа источника…")
@@ -580,6 +664,7 @@ class SitePage(QWidget):
     def _show_product_links(self) -> None:
         total = len(self._product_links)
         shown = min(total, 20)
+        self.links_preview.reset_link_hover()
         self.links_preview.setRowCount(shown)
         for row, links in enumerate(self._product_links[:shown]):
             values = (
@@ -592,10 +677,7 @@ class SitePage(QWidget):
                     item.setToolTip(value)
                 if column > 0 and value:
                     item.setData(Qt.ItemDataRole.UserRole, value)
-                    item.setForeground(QColor("#245fd2"))
-                    font = item.font()
-                    font.setUnderline(True)
-                    item.setFont(font)
+                    item.setForeground(LinksPreviewTable._LINK_COLOR)
                 self.links_preview.setItem(row, column, item)
         self.links_status.setText(f"Загружено товаров: {total}")
         if total:
@@ -884,6 +966,15 @@ class MainWindow(QMainWindow):
         self.save_config_button.clicked.connect(self._choose_save_config)
         self.load_config_button.clicked.connect(self._choose_load_config)
         self._refresh_browsers()
+        self._clickable_cursor_filter = ClickableCursorFilter(self)
+        clickable_widgets = (
+            *self.findChildren(QAbstractButton),
+            *self.findChildren(QComboBox),
+            self.tabs.tabBar(),
+        )
+        for widget in clickable_widgets:
+            widget.installEventFilter(self._clickable_cursor_filter)
+            self._clickable_cursor_filter.update_cursor(widget)
 
     @Slot()
     def _refresh_browsers(self) -> None:

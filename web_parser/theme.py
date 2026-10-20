@@ -86,6 +86,7 @@ QTableWidget {
     gridline-color: #e0e6ef; selection-background-color: #dce9ff;
     selection-color: #243246;
 }
+QTableWidget#linksPreview::item { padding: 6px 8px; }
 QHeaderView::section {
     background: #e8eff9; color: #334a68; border: none;
     border-bottom: 1px solid #c4d2e4; padding: 7px 8px; font-weight: 600;

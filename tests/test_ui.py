@@ -143,6 +143,23 @@ class InterfaceTests(unittest.TestCase):
         self.assertEqual(page.token.echoMode(), QLineEdit.EchoMode.Password)
         self.assertEqual(page.ftp_password.echoMode(), QLineEdit.EchoMode.Password)
 
+    def test_clickable_controls_use_hand_cursor_only_when_enabled(self):
+        page = self.window.pages[SITES[0]]
+        hand = Qt.CursorShape.PointingHandCursor
+        arrow = Qt.CursorShape.ArrowCursor
+        self.assertEqual(self.window.save_config_button.cursor().shape(), hand)
+        self.assertEqual(self.window.tabs.tabBar().cursor().shape(), hand)
+        self.assertEqual(page.source_schedule_enabled.cursor().shape(), hand)
+        self.assertEqual(page.browser.cursor().shape(), hand)
+        self.assertEqual(page.start_button.cursor().shape(), arrow)
+        self.assertEqual(page.load_links_button.cursor().shape(), arrow)
+
+        page.source_url.setText("https://example.org/products.json")
+        page.token.setText("token")
+        self.assertEqual(page.load_links_button.cursor().shape(), hand)
+        page.token.clear()
+        self.assertEqual(page.load_links_button.cursor().shape(), arrow)
+
     def test_log_export_clear_and_site_isolation(self):
         first, second = (self.window.pages[site].log for site in SITES[:2])
         first.error_received.emit("42", "https://example.org/product", "Страница не найдена\n404")
@@ -296,10 +313,21 @@ class InterfaceTests(unittest.TestCase):
         self.assertTrue(table.wordWrap())
         self.assertEqual(table.textElideMode(), Qt.TextElideMode.ElideNone)
         self.assertGreater(table.rowHeight(0), table.fontMetrics().height() * 2)
-        self.assertTrue(table.item(0, 1).font().underline())
+        link_item = table.item(0, 1)
+        self.assertFalse(link_item.font().underline())
 
         link_cell = table.visualItemRect(table.item(0, 1))
         click_near_right_edge = QPoint(link_cell.right() - 3, link_cell.center().y())
+        QTest.mouseMove(table.viewport(), pos=link_cell.center())
+        self.assertEqual(table.viewport().cursor().shape(), Qt.CursorShape.PointingHandCursor)
+        self.assertTrue(link_item.font().underline())
+        self.assertEqual(link_item.foreground().color().name(), "#1b50b6")
+        self.assertEqual(link_item.background().color().name(), "#e8f0ff")
+        QTest.mouseMove(table.viewport(), pos=table.visualItemRect(table.item(0, 0)).center())
+        self.assertEqual(table.viewport().cursor().shape(), Qt.CursorShape.ArrowCursor)
+        self.assertFalse(link_item.font().underline())
+        self.assertEqual(link_item.foreground().color().name(), "#245fd2")
+        self.assertEqual(link_item.data(Qt.ItemDataRole.BackgroundRole), None)
         with patch("web_parser.ui.QDesktopServices.openUrl", return_value=True) as open_url:
             QTest.mouseClick(table.viewport(), Qt.MouseButton.LeftButton, pos=click_near_right_edge)
             QTest.mouseClick(
