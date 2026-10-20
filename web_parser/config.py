@@ -14,7 +14,7 @@ import tempfile
 
 
 VERSION = 1
-SITES = ("sail-master.ru", "fishingline.ru", "petrokanat.ru", "commercial-fishing.ru")
+SITES = ("sail-master.ru", "fishingline.ru", "petrokanat.ru", "setepolotna.ru")
 BROWSERS = ("Яндекс Браузер", "Google Chrome", "Microsoft Edge", "Mozilla Firefox")
 INTERVAL_UNITS = ("hours", "days", "weeks", "months")
 _SECRET_MARKER = b"web-parser-config-v1:\0"

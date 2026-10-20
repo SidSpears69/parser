@@ -110,6 +110,8 @@ class InterfaceTests(unittest.TestCase):
 
     def test_tabs_keep_independent_values(self):
         self.assertEqual(self.window.tabs.count(), 4)
+        self.assertEqual(self.window.tabs.tabText(3), "setepolotna.ru")
+        self.assertIn("setepolotna.ru", self.window.pages)
         first, second = (self.window.pages[site] for site in SITES[:2])
         first.source_url.setText("https://example.org/data.json")
         first.ftp_port.setValue(2121)
