@@ -2,6 +2,7 @@
 
 from datetime import datetime
 from pathlib import Path
+from threading import Event
 from typing import Callable
 from urllib.parse import quote, quote_plus
 
@@ -15,8 +16,11 @@ from PySide6.QtWidgets import (
 )
 
 from web_parser import config
+from web_parser.browser_access import (
+    BrowserAccessCancelled, BrowserAccessDenied, BrowserAccessError,
+    BrowserPageAccess, browser_profile_dir,
+)
 from web_parser.browser_discovery import BrowserInstallation, discover_browsers
-from web_parser.browser_session import BrowserError, BrowserSessionManager
 from web_parser.product_links import ProductLinks, ProductLinksError, fetch_product_links
 
 
@@ -170,22 +174,90 @@ class ErrorLog(QWidget):
         self.clear_button.setEnabled(has_text)
 
 
-class BrowserLaunchThread(QThread):
-    """Run the potentially slow driver lookup and browser start off the UI thread."""
+class BrowserWalkThread(QThread):
+    """Visit the loaded marketplace URLs in one thread-affine Playwright session."""
 
-    def __init__(self, manager: BrowserSessionManager, name: str, binary: Path, parent=None):
+    page_started = Signal(str, str, str, int, int)
+    page_loaded = Signal(str, str, int, int, int)
+    page_failed = Signal(str, str, str, int, int, str)
+
+    def __init__(
+        self, site: str, installation: BrowserInstallation, links: tuple[ProductLinks, ...],
+        pause_seconds: int, parent=None,
+    ) -> None:
         super().__init__(parent)
-        self.manager = manager
-        self.name = name
-        self.binary = binary
-        self.description: str | None = None
+        self.site = site
+        self.installation = installation
+        self.links = links
+        self.pause_seconds = pause_seconds
+        self.loaded = 0
+        self.failed = 0
+        self.skipped = 0
+        self.cancelled = False
         self.error: str | None = None
+        self._stop_event = Event()
+
+    @property
+    def stop_requested(self) -> bool:
+        return self._stop_event.is_set()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+
+    def _pause(self, seconds: float) -> None:
+        self._stop_event.wait(seconds)
 
     def run(self) -> None:
+        total = len(self.links) * 3
+        index = 0
+        blocked_marketplaces: set[str] = set()
         try:
-            self.description = self.manager.launch(self.name, self.binary)
-        except BrowserError as error:
-            self.error = str(error) or type(error).__name__
+            with BrowserPageAccess(
+                self.installation, self.pause_seconds, headless=False,
+                sleep=self._pause, cancel_requested=self._stop_event.is_set,
+                profile_dir=browser_profile_dir(self.site, self.installation.name),
+            ) as access:
+                for product in self.links:
+                    for marketplace, url in (
+                        ("Ozon", product.ozon_url),
+                        ("Wildberries", product.wildberries_url),
+                        ("Яндекс Маркет", product.yandex_market_url),
+                    ):
+                        if self.stop_requested:
+                            self.cancelled = True
+                            return
+                        index += 1
+                        if marketplace in blocked_marketplaces:
+                            self.skipped += 1
+                            continue
+                        self.page_started.emit(product.product_id, marketplace, url, index, total)
+                        try:
+                            snapshot = access.fetch(url)
+                        except BrowserAccessCancelled:
+                            self.cancelled = True
+                            return
+                        except BrowserAccessDenied as error:
+                            blocked_marketplaces.add(marketplace)
+                            self.failed += 1
+                            self.page_failed.emit(
+                                product.product_id, marketplace, url, index, total,
+                                f"{error} Остальные ссылки {marketplace} в этом обходе пропущены.",
+                            )
+                        except BrowserAccessError as error:
+                            self.failed += 1
+                            self.page_failed.emit(
+                                product.product_id, marketplace, url, index, total, str(error),
+                            )
+                        else:
+                            self.loaded += 1
+                            self.page_loaded.emit(
+                                product.product_id, marketplace, index, total, snapshot.status,
+                            )
+        except BrowserAccessError as error:
+            if self.stop_requested:
+                self.cancelled = True
+            else:
+                self.error = str(error) or type(error).__name__
 
 
 class ProductLinksFetchThread(QThread):
@@ -212,18 +284,16 @@ class ProductLinksFetchThread(QThread):
 
 
 class SitePage(QWidget):
-    start_requested = Signal(str)
-    stop_requested = Signal(str)
     refresh_browsers_requested = Signal()
-    browser_launch_finished = Signal()
+    walk_finished = Signal()
+    walk_state_changed = Signal()
     links_fetch_finished = Signal()
 
     def __init__(self, site: str, parent: QWidget | None = None):
         super().__init__(parent)
         self.site = site
         self._available_browsers: dict[str, BrowserInstallation] = {}
-        self._browser_manager: BrowserSessionManager | None = None
-        self._launch_thread: BrowserLaunchThread | None = None
+        self._walk_thread: BrowserWalkThread | None = None
         self._links_thread: ProductLinksFetchThread | None = None
         self._product_links: tuple[ProductLinks, ...] = ()
         self._shutting_down = False
@@ -233,12 +303,13 @@ class SitePage(QWidget):
         layout.setSpacing(14)
 
         toolbar = QHBoxLayout()
-        toolbar.addWidget(label("Сбор данных", "sectionTitle"))
+        toolbar.addWidget(label("Обход страниц", "sectionTitle"))
         self.state_label = label("Не запущен", "state")
         toolbar.addWidget(self.state_label)
         toolbar.addStretch()
         self.start_button = QPushButton("Запустить")
         self.start_button.setObjectName("primary")
+        self.start_button.setEnabled(False)
         self.stop_button = QPushButton("Остановить")
         self.stop_button.setEnabled(False)
         toolbar.addWidget(self.start_button)
@@ -307,7 +378,7 @@ class SitePage(QWidget):
         self.browser.setObjectName("browser")
         for browser_name in BROWSERS:
             self.browser.addItem(browser_name, browser_name)
-        self.browser.setToolTip("Выберите установленный браузер для проверки запуска.")
+        self.browser.setToolTip("Выберите браузер для обхода загруженных ссылок.")
         self.refresh_browsers_button = QPushButton("Обновить")
         self.refresh_browsers_button.setObjectName("refreshBrowsers")
         self.refresh_browsers_button.setToolTip("Повторно найти браузеры на этом компьютере")
@@ -325,21 +396,10 @@ class SitePage(QWidget):
         self.browser_path_label = label("Установленный браузер не найден.", "hint")
         self.browser_path_label.setWordWrap(True)
         browser_layout.addWidget(self.browser_path_label)
-        browser_actions = QHBoxLayout()
-        self.launch_browser_button = QPushButton("Запустить браузер")
-        self.launch_browser_button.setObjectName("launchBrowser")
-        self.launch_browser_button.setEnabled(False)
-        self.close_browser_button = QPushButton("Закрыть браузер")
-        self.close_browser_button.setObjectName("closeBrowser")
-        self.close_browser_button.setEnabled(False)
-        browser_actions.addWidget(self.launch_browser_button)
-        browser_actions.addWidget(self.close_browser_button)
-        browser_actions.addStretch()
-        browser_layout.addLayout(browser_actions)
-        self.browser_launch_status = label("Браузер не запущен.", "hint")
-        self.browser_launch_status.setWordWrap(True)
-        browser_layout.addWidget(self.browser_launch_status)
-        hint = label("Браузер используется для Ozon и Яндекс Маркета. Wildberries — через JSON.", "hint")
+        self.run_status = label("Загрузите ссылки из JSON, затем нажмите «Запустить».", "hint")
+        self.run_status.setWordWrap(True)
+        browser_layout.addWidget(self.run_status)
+        hint = label("Откроются все три ссылки каждого товара по очереди. Данные со страниц пока не извлекаются.", "hint")
         hint.setWordWrap(True)
         browser_layout.addWidget(hint)
         browser_layout.addStretch()
@@ -397,12 +457,10 @@ class SitePage(QWidget):
 
         self.log = ErrorLog(site)
         layout.addWidget(self.log, 1)
-        self.start_button.clicked.connect(lambda: self.start_requested.emit(self.site))
-        self.stop_button.clicked.connect(lambda: self.stop_requested.emit(self.site))
+        self.start_button.clicked.connect(self._start_walk)
+        self.stop_button.clicked.connect(self._stop_walk)
         self.browser.currentIndexChanged.connect(self._update_browser_controls)
         self.refresh_browsers_button.clicked.connect(lambda: self.refresh_browsers_requested.emit())
-        self.launch_browser_button.clicked.connect(self._launch_browser)
-        self.close_browser_button.clicked.connect(self._close_browser)
         self.source_url.textChanged.connect(self._clear_product_links)
         self.token.textChanged.connect(self._clear_product_links)
         self.load_links_button.clicked.connect(self._fetch_product_links)
@@ -426,19 +484,24 @@ class SitePage(QWidget):
             self.links_preview.setRowCount(0)
             self.links_status.setText("Ссылки ещё не загружены.")
             self.links_preview_hint.setText("Загрузите JSON, чтобы увидеть ID и ссылки товаров.")
+            if self._walk_thread is None:
+                self.state_label.setText("Не запущен")
+                self.run_status.setText("Загрузите ссылки из JSON, затем нажмите «Запустить».")
         self._update_links_controls()
 
     def _update_links_controls(self) -> None:
         fetching = self._links_thread is not None
-        self.source_url.setEnabled(not fetching)
-        self.token.setEnabled(not fetching)
+        walking = self._walk_thread is not None
+        self.source_url.setEnabled(not fetching and not walking)
+        self.token.setEnabled(not fetching and not walking)
         self.load_links_button.setEnabled(
             bool(self.source_url.text().strip() and self.token.text())
-            and not fetching and not self._shutting_down
+            and not fetching and not walking and not self._shutting_down
         )
+        self._update_browser_controls()
 
     def _fetch_product_links(self) -> None:
-        if self._links_thread is not None:
+        if self._links_thread is not None or self._walk_thread is not None:
             return
         source_url = self.source_url.text().strip()
         token = self.token.text()
@@ -446,8 +509,11 @@ class SitePage(QWidget):
             return
         self._product_links = ()
         self.links_preview.setRowCount(0)
+        self._update_browser_controls()
         self.links_preview_hint.setText("Ожидание ответа источника…")
         self.links_status.setText("Загрузка JSON и разбор ссылок…")
+        self.state_label.setText("Не запущен")
+        self.run_status.setText("Загрузка ссылок из JSON…")
         thread = ProductLinksFetchThread(source_url, token, self)
         self._links_thread = thread
         thread.finished.connect(self._product_links_fetched)
@@ -472,10 +538,12 @@ class SitePage(QWidget):
         if source_changed:
             self.links_status.setText("Источник или токен изменились во время загрузки. Загрузите ссылки снова.")
             self.links_preview_hint.setText("Данные прежнего источника отброшены.")
+            self.run_status.setText("Загрузите ссылки для текущего источника.")
         elif thread.error is not None or thread.links is None:
             message = thread.error or "Загрузка прервана из-за внутренней ошибки."
             self.links_status.setText(f"Не удалось загрузить ссылки: {message}")
             self.links_preview_hint.setText("Проверьте URL и токен доступа.")
+            self.run_status.setText("Ссылки не загружены. Проверьте источник и токен.")
             self.log.append_error("", "", f"Сбор ссылок: {message}")
         else:
             self._product_links = tuple(thread.links)
@@ -500,6 +568,10 @@ class SitePage(QWidget):
                     item.setToolTip(value)
                 self.links_preview.setItem(row, column, item)
         self.links_status.setText(f"Загружено товаров: {total}")
+        if total:
+            self.run_status.setText(f"Готово к обходу: {total} товаров, {total * 3} страниц.")
+        else:
+            self.run_status.setText("В загруженном JSON нет ссылок для обхода.")
         self.links_preview_hint.setText(
             f"Показаны первые {shown} из {total} товаров." if total > shown
             else "Все загруженные товары показаны в таблице." if total
@@ -513,111 +585,146 @@ class SitePage(QWidget):
             self._links_thread.wait()
 
     @property
-    def browser_launch_pending(self) -> bool:
-        """Whether launch results still need to be processed by this page."""
-        return self._launch_thread is not None
+    def walk_pending(self) -> bool:
+        """Whether a traversal worker still belongs to this page."""
+        return self._walk_thread is not None
 
-    @property
-    def browser_launch_in_progress(self) -> bool:
-        """Whether the browser launch worker is still running."""
-        return self._launch_thread is not None and self._launch_thread.isRunning()
-
-    def prepare_browser_shutdown(self) -> None:
+    def prepare_walk_shutdown(self) -> None:
         self._shutting_down = True
+        if self._walk_thread is not None:
+            self._walk_thread.stop()
 
     def set_available_browsers(self, available: dict[str, BrowserInstallation]) -> None:
         """Refresh installation hints while retaining canonical config values."""
         self._available_browsers = available.copy()
         for index, browser_name in enumerate(BROWSERS):
             installation = available.get(browser_name)
-            suffix = "найден" if installation else "не найден"
+            suffix = (
+                "сборка Playwright" if browser_name == "Mozilla Firefox"
+                else "найден" if installation else "не найден"
+            )
             self.browser.setItemText(index, f"{browser_name} — {suffix}")
             self.browser.setItemData(
-                index, str(installation.path) if installation else "", Qt.ItemDataRole.ToolTipRole
+                index,
+                "Используется сборка Playwright" if browser_name == "Mozilla Firefox"
+                else str(installation.path) if installation else "",
+                Qt.ItemDataRole.ToolTipRole,
             )
         self._update_browser_controls()
 
     def _selected_browser_name(self) -> str:
         return str(self.browser.currentData())
 
+    def _selected_installation(self) -> BrowserInstallation | None:
+        name = self._selected_browser_name()
+        if name == "Mozilla Firefox":
+            return self._available_browsers.get(name) or BrowserInstallation(name, Path())
+        return self._available_browsers.get(name)
+
     def _update_browser_controls(self) -> None:
         name = self._selected_browser_name()
         installation = self._available_browsers.get(name)
-        path_text = f"Путь: {installation.path}" if installation else "Установленный браузер не найден."
+        path_text = (
+            "Firefox: используется сборка Playwright; наличие проверяется при запуске."
+            if name == "Mozilla Firefox" else
+            f"Путь: {installation.path}" if installation else "Установленный браузер не найден."
+        )
         self.browser_path_label.setText(path_text)
-        self.browser_path_label.setToolTip(str(installation.path) if installation else "")
-        starting = self._launch_thread is not None and self._launch_thread.isRunning()
-        running = self._browser_manager is not None and self._browser_manager.is_running
-        self.browser.setEnabled(not starting and not running)
-        self.refresh_browsers_button.setEnabled(not starting and not running)
-        self.launch_browser_button.setEnabled(installation is not None and not starting and not running)
-        self.close_browser_button.setEnabled(running and not starting)
+        self.browser_path_label.setToolTip(str(installation.path) if installation and name != "Mozilla Firefox" else "")
+        walking = self._walk_thread is not None
+        self.browser.setEnabled(not walking and not self._shutting_down)
+        self.pause.setEnabled(not walking and not self._shutting_down)
+        self.refresh_browsers_button.setEnabled(not walking and not self._shutting_down)
+        self.start_button.setEnabled(
+            bool(self._product_links) and self._selected_installation() is not None
+            and not walking and self._links_thread is None and not self._shutting_down
+        )
+        self.stop_button.setEnabled(
+            walking and not self._shutting_down
+            and self._walk_thread is not None and not self._walk_thread.stop_requested
+        )
 
-    def _launch_browser(self) -> None:
-        name = self._selected_browser_name()
-        installation = self._available_browsers.get(name)
-        if installation is None or self._launch_thread is not None:
+    def _start_walk(self) -> None:
+        installation = self._selected_installation()
+        if (
+            installation is None or not self._product_links or self._walk_thread is not None
+            or self._links_thread is not None or self._shutting_down
+        ):
             return
-        self._browser_manager = BrowserSessionManager()
-        thread = BrowserLaunchThread(self._browser_manager, name, installation.path, self)
-        self._launch_thread = thread
-        self.browser_launch_status.setText(f"Запускается {name}; подбор драйвера может занять время…")
-        thread.finished.connect(self._browser_launch_finished)
+        thread = BrowserWalkThread(self.site, installation, self._product_links, self.pause.value(), self)
+        self._walk_thread = thread
+        self.state_label.setText("Запуск…")
+        self.run_status.setText(f"Открывается {installation.name}; страниц в очереди: {len(self._product_links) * 3}.")
+        thread.page_started.connect(self._walk_page_started)
+        thread.page_loaded.connect(self._walk_page_loaded)
+        thread.page_failed.connect(self._walk_page_failed)
+        thread.finished.connect(self._walk_finished)
         thread.start()
-        self._update_browser_controls()
+        self._update_links_controls()
+        self.walk_state_changed.emit()
 
-    @Slot()
-    def _browser_launch_finished(self) -> None:
-        thread = self._launch_thread
+    def _stop_walk(self) -> None:
+        thread = self._walk_thread
         if thread is None:
             return
-        self._launch_thread = None
+        thread.stop()
+        self.state_label.setText("Остановка…")
+        self.run_status.setText("Ожидание завершения текущей загрузки…")
+        self._update_browser_controls()
+
+    @Slot(str, str, str, int, int)
+    def _walk_page_started(self, product_id: str, marketplace: str, url: str, index: int, total: int) -> None:
         if self._shutting_down:
-            if self._browser_manager is not None:
-                try:
-                    self._browser_manager.close()
-                except BrowserError:
-                    pass
-            thread.deleteLater()
-            self.browser_launch_finished.emit()
             return
-        if thread.error or thread.description is None:
-            error_message = thread.error or "Запуск прерван из-за внутренней ошибки."
-            if self._browser_manager is not None:
-                try:
-                    self._browser_manager.close()
-                except BrowserError:
-                    pass
-            self.browser_launch_status.setText(f"Не удалось запустить браузер: {error_message}")
-            self.log.append_error("", "", f"Запуск браузера: {error_message}")
-        else:
-            self.browser_launch_status.setText(f"Браузер запущен. {thread.description}")
-        self._update_browser_controls()
+        self.state_label.setText(f"Обход {index}/{total}")
+        self.run_status.setText(f"Открывается {marketplace}, товар {product_id}: {url}")
+        row = (index - 1) // 3
+        if row < self.links_preview.rowCount():
+            self.links_preview.setCurrentCell(row, (index - 1) % 3 + 1)
+
+    @Slot(str, str, int, int, int)
+    def _walk_page_loaded(
+        self, product_id: str, marketplace: str, index: int, total: int, status: int,
+    ) -> None:
+        if not self._shutting_down:
+            detail = (
+                "страница открылась после проверки браузера (первичный HTTP 403)"
+                if marketplace == "Ozon" and status == 403 else
+                "страница открылась после проверки браузера (первичный HTTP 498)"
+                if marketplace == "Wildberries" and status == 498 else f"HTTP {status}"
+            )
+            self.run_status.setText(f"Загружено {index}/{total}: {marketplace}, товар {product_id}, {detail}.")
+
+    @Slot(str, str, str, int, int, str)
+    def _walk_page_failed(
+        self, product_id: str, marketplace: str, url: str, index: int, total: int, message: str,
+    ) -> None:
+        if not self._shutting_down:
+            self.run_status.setText(f"Ошибка {index}/{total}: {marketplace}, товар {product_id}.")
+            self.log.append_error(product_id, url, f"{marketplace}: {message}")
+
+    @Slot()
+    def _walk_finished(self) -> None:
+        thread = self._walk_thread
+        if thread is None:
+            return
+        self._walk_thread = None
+        if not self._shutting_down:
+            if thread.error:
+                self.state_label.setText("Ошибка")
+                self.run_status.setText(f"Не удалось выполнить обход: {thread.error}")
+                self.log.append_error("", "", f"Обход страниц: {thread.error}")
+            else:
+                self.state_label.setText("Остановлен" if thread.cancelled else "Завершён")
+                ending = "Остановлено" if thread.cancelled else "Обход завершён"
+                self.run_status.setText(
+                    f"{ending}. Загружено: {thread.loaded}; ошибок: {thread.failed}; "
+                    f"пропущено: {thread.skipped}."
+                )
+            self._update_links_controls()
         thread.deleteLater()
-        self.browser_launch_finished.emit()
-
-    def _close_browser(self) -> None:
-        if self._launch_thread is not None or self._browser_manager is None:
-            return
-        try:
-            self._browser_manager.close()
-        except BrowserError as error:
-            self.browser_launch_status.setText(f"Не удалось закрыть браузер: {error}")
-            self.log.append_error("", "", f"Закрытие браузера: {error}")
-        else:
-            self.browser_launch_status.setText("Браузер закрыт.")
-        self._update_browser_controls()
-
-    def shutdown_browser(self) -> None:
-        """Keep the worker alive until launch completes, then release its session."""
-        self.prepare_browser_shutdown()
-        if self._launch_thread is not None:
-            self._launch_thread.wait()
-        if self._browser_manager is not None:
-            try:
-                self._browser_manager.close()
-            except BrowserError:
-                pass
+        self.walk_state_changed.emit()
+        self.walk_finished.emit()
 
     def resizeEvent(self, event) -> None:
         # QScrollArea may keep the page wider than its viewport to satisfy a
@@ -727,9 +834,9 @@ class MainWindow(QMainWindow):
             scroll.setFrameShape(QFrame.Shape.NoFrame)
             scroll.setWidget(page)
             self.tabs.addTab(scroll, site)
-            page.start_requested.connect(self._collection_unavailable)
             page.refresh_browsers_requested.connect(self._refresh_browsers)
-            page.browser_launch_finished.connect(self._resume_close)
+            page.walk_finished.connect(self._resume_close)
+            page.walk_state_changed.connect(self._update_config_controls)
             page.links_fetch_finished.connect(self._resume_close)
         layout.addWidget(self.tabs, 1)
         self.save_config_button.clicked.connect(self._choose_save_config)
@@ -741,8 +848,8 @@ class MainWindow(QMainWindow):
         available = discover_browsers()
         for page in self.pages.values():
             page.set_available_browsers(available)
-            if not self._browsers_scanned and available and page.settings()["browser"] not in available:
-                first_installed = next(iter(available))
+            if not self._browsers_scanned and page.settings()["browser"] not in available:
+                first_installed = next(iter(available), "Mozilla Firefox")
                 page.browser.setCurrentIndex(page.browser.findData(first_installed))
         self._browsers_scanned = True
         self.statusBar().showMessage(f"Найдено браузеров: {len(available)}")
@@ -750,7 +857,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event) -> None:
         busy = [
             page for page in self.pages.values()
-            if page.browser_launch_pending or page.links_fetch_pending
+            if page.walk_pending or page.links_fetch_pending
         ]
         if busy:
             event.ignore()
@@ -759,17 +866,17 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage("Завершаются фоновые операции перед закрытием приложения…")
                 self.setEnabled(False)
                 for page in self.pages.values():
-                    page.prepare_browser_shutdown()
+                    page.prepare_walk_shutdown()
             return
         for page in self.pages.values():
-            page.shutdown_browser()
+            page.prepare_walk_shutdown()
             page.shutdown_links()
         super().closeEvent(event)
 
     @Slot()
     def _resume_close(self) -> None:
         if self._close_pending and all(
-            not page.browser_launch_pending and not page.links_fetch_pending
+            not page.walk_pending and not page.links_fetch_pending
             for page in self.pages.values()
         ):
             self._close_pending = False
@@ -780,6 +887,8 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Настройки сохранены в {Path(path).name}")
 
     def load_config_from(self, path: str | Path) -> None:
+        if any(page.walk_pending for page in self.pages.values()):
+            raise ValueError("Остановите обход страниц перед загрузкой настроек.")
         settings_by_site = config.load(path)
         if set(settings_by_site) != set(SITES):
             raise ValueError("Файл должен содержать настройки всех четырёх сайтов")
@@ -809,6 +918,8 @@ class MainWindow(QMainWindow):
         except (OSError, ValueError) as error:
             QMessageBox.warning(self, "Не удалось загрузить настройки", str(error))
 
-    @Slot(str)
-    def _collection_unavailable(self, site: str) -> None:
-        self.statusBar().showMessage(f"{site}: модуль сбора ещё не подключён. Запуск не выполнен.")
+    @Slot()
+    def _update_config_controls(self) -> None:
+        self.load_config_button.setEnabled(
+            not any(page.walk_pending for page in self.pages.values()) and not self._close_pending
+        )

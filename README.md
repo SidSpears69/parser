@@ -7,6 +7,7 @@
 ```powershell
 py -3.14 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m playwright install firefox
 .\.venv\Scripts\python.exe main.py
 ```
 

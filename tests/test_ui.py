@@ -15,8 +15,11 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QLineEdit
 
 from web_parser.app import create_application
+from web_parser.browser_access import (
+    BrowserAccessCancelled, BrowserAccessDenied, BrowserAccessError,
+    PageSnapshot, browser_profile_dir,
+)
 from web_parser.browser_discovery import BrowserInstallation
-from web_parser.browser_session import BrowserError
 from web_parser.product_links import ProductLinks, ProductLinksError
 from web_parser.ui import MainWindow, SITES
 
@@ -47,6 +50,63 @@ class InterfaceTests(unittest.TestCase):
         while self.window.isVisible() and time.monotonic() < deadline:
             QTest.qWait(10)
         self.assertFalse(self.window.isVisible())
+
+    def _load_links(self, page, links: list[ProductLinks]) -> None:
+        page.source_url.setText("https://example.org/products.json")
+        page.token.setText("private-token")
+        with patch("web_parser.ui.fetch_product_links", return_value=links):
+            page.load_links_button.click()
+            deadline = time.monotonic() + 3
+            while page.links_fetch_pending and time.monotonic() < deadline:
+                QTest.qWait(10)
+        self.assertEqual(page.product_links, tuple(links))
+
+    def _wait_for_walk(self, page) -> None:
+        deadline = time.monotonic() + 4
+        while page.walk_pending and time.monotonic() < deadline:
+            QTest.qWait(10)
+        self.assertFalse(page.walk_pending)
+
+    def _assert_denied_marketplace_is_skipped(
+        self, blocked_url_field: str, denial: BrowserAccessDenied,
+    ) -> None:
+        page = self.window.pages[SITES[0]]
+        links = [ProductLinks(
+            str(index), f"https://ozon.example/{index}", f"https://wb.example/{index}",
+            f"https://market.yandex.ru/search?text={index}",
+        ) for index in (1, 2)]
+        self._load_links(page, links)
+        blocked_url = getattr(links[0], blocked_url_field)
+        skipped_url = getattr(links[1], blocked_url_field)
+        visited = []
+
+        class DeniedAccess:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                pass
+
+            @staticmethod
+            def fetch(url):
+                visited.append(url)
+                if url == blocked_url:
+                    raise denial
+                return PageSnapshot(url, url, 200, "<html>Товар</html>", 1)
+
+        with patch("web_parser.ui.BrowserPageAccess", DeniedAccess):
+            page.start_button.click()
+            self._wait_for_walk(page)
+        self.assertNotIn(skipped_url, visited)
+        self.assertEqual(len(visited), 5)
+        self.assertIn("Загружено: 4; ошибок: 1; пропущено: 1", page.run_status.text())
+        self.assertEqual(page.log.editor.document().blockCount(), 1)
+        log = page.log.editor.toPlainText()
+        self.assertIn(str(denial), log)
+        self.assertIn(blocked_url, log)
 
     def test_tabs_keep_independent_values(self):
         self.assertEqual(self.window.tabs.count(), 4)
@@ -91,16 +151,17 @@ class InterfaceTests(unittest.TestCase):
         self.assertTrue(first.editor.document().isEmpty())
         self.assertFalse(first.save_button.isEnabled())
 
-    def test_log_limit_and_launch_placeholder(self):
+    def test_log_limit_and_start_requires_loaded_links(self):
         page = self.window.pages[SITES[0]]
         for index in range(2005):
             page.log.append_error(str(index), "", "Ошибка")
         self.assertEqual(page.log.editor.document().blockCount(), 2000)
         self.assertNotIn("ID: 0 |", page.log.editor.toPlainText())
         QTest.mouseClick(page.start_button, Qt.MouseButton.LeftButton)
-        self.assertIn("Запуск не выполнен", self.window.statusBar().currentMessage())
         self.assertEqual(page.state_label.text(), "Не запущен")
+        self.assertFalse(page.start_button.isEnabled())
         self.assertFalse(page.stop_button.isEnabled())
+        self.assertIn("Загрузите ссылки", page.run_status.text())
         self.assertTrue(self.window.save_config_button.isEnabled())
 
     def test_configuration_round_trip_restores_each_tab(self):
@@ -159,7 +220,7 @@ class InterfaceTests(unittest.TestCase):
             page.browser.setCurrentIndex(chrome_index)
             self.assertIn("найден", page.browser.currentText())
             self.assertIn(str(chrome.path), page.browser_path_label.text())
-            self.assertTrue(page.launch_browser_button.isEnabled())
+            self.assertFalse(page.start_button.isEnabled())
             self.assertEqual(page.settings()["browser"], "Google Chrome")
 
     def test_product_links_load_is_per_site_and_shows_preview(self):
@@ -270,95 +331,222 @@ class InterfaceTests(unittest.TestCase):
         with patch("web_parser.ui.fetch_product_links", side_effect=slow_fetch):
             self._close_window_while_worker_runs(page.load_links_button.click, release)
 
-    def test_browser_launch_and_close_uses_selected_binary(self):
-        chrome = BrowserInstallation("Google Chrome", Path("C:/Browsers/Chrome/chrome.exe"))
+    def test_start_visits_all_urls_in_json_order_and_logs_page_error(self):
         page = self.window.pages[SITES[0]]
+        chrome = BrowserInstallation("Google Chrome", Path("C:/Browsers/Chrome/chrome.exe"))
         page.set_available_browsers({chrome.name: chrome})
         page.browser.setCurrentIndex(page.browser.findData(chrome.name))
+        links = [ProductLinks(
+            str(index), f"https://ozon.example/{index}",
+            f"https://wildberries.example/{index}", f"https://market.example/{index}",
+        ) for index in (1, 2)]
+        self._load_links(page, links)
+        self.assertTrue(page.start_button.isEnabled())
+        self.assertFalse(hasattr(page, "launch_browser_button"))
+        self.assertFalse(hasattr(page, "close_browser_button"))
+        visited = []
+        created = []
 
-        class FakeManager:
-            def __init__(self):
-                self.is_running = False
-                self.launched_with = None
-                self.closed = False
+        class FakeAccess:
+            def __init__(self, installation, pause_seconds, **options):
+                created.append((installation, pause_seconds, options))
 
-            def launch(self, name, binary):
-                self.launched_with = (name, binary)
-                self.is_running = True
-                return "Chrome 100; драйвер: mock-driver.exe"
+            def __enter__(self):
+                return self
 
-            def close(self):
-                self.is_running = False
-                self.closed = True
-
-        fake_manager = FakeManager()
-        with patch("web_parser.ui.BrowserSessionManager", return_value=fake_manager):
-            page.launch_browser_button.click()
-            deadline = time.monotonic() + 3
-            while page.browser_launch_pending and time.monotonic() < deadline:
-                QTest.qWait(10)
-
-        self.assertFalse(page.browser_launch_pending)
-        self.assertEqual(fake_manager.launched_with, (chrome.name, chrome.path))
-        self.assertIn("Браузер запущен", page.browser_launch_status.text())
-        self.assertFalse(page.browser.isEnabled())
-        self.assertTrue(page.close_browser_button.isEnabled())
-        page.close_browser_button.click()
-        self.assertTrue(fake_manager.closed)
-        self.assertTrue(page.browser.isEnabled())
-        self.assertTrue(page.launch_browser_button.isEnabled())
-        self.assertIn("Браузер закрыт", page.browser_launch_status.text())
-
-    def test_browser_launch_error_is_shown_and_logged(self):
-        chrome = BrowserInstallation("Google Chrome", Path("C:/Browsers/Chrome/chrome.exe"))
-        page = self.window.pages[SITES[0]]
-        page.set_available_browsers({chrome.name: chrome})
-        page.browser.setCurrentIndex(page.browser.findData(chrome.name))
-
-        class FailingManager:
-            is_running = False
-
-            def launch(self, _name, _binary):
-                raise BrowserError("Драйвер недоступен")
-
-            def close(self):
+            def __exit__(self, *_args):
                 pass
 
-        with patch("web_parser.ui.BrowserSessionManager", return_value=FailingManager()):
-            page.launch_browser_button.click()
-            deadline = time.monotonic() + 3
-            while page.browser_launch_pending and time.monotonic() < deadline:
-                QTest.qWait(10)
+            @staticmethod
+            def fetch(url):
+                visited.append(url)
+                if url == links[0].wildberries_url:
+                    raise BrowserAccessError("HTTP 503")
+                return PageSnapshot(url, url, 200, "<html>Товар</html>", 1)
 
-        self.assertIn("Драйвер недоступен", page.browser_launch_status.text())
-        self.assertIn("Драйвер недоступен", page.log.editor.toPlainText())
-        self.assertTrue(page.launch_browser_button.isEnabled())
+        with patch("web_parser.ui.BrowserPageAccess", FakeAccess):
+            page.start_button.click()
+            self.assertFalse(page.start_button.isEnabled())
+            self.assertFalse(self.window.load_config_button.isEnabled())
+            self._wait_for_walk(page)
 
-    def test_window_close_during_driver_lookup_does_not_block_ui(self):
-        chrome = BrowserInstallation("Google Chrome", Path("C:/Browsers/Chrome/chrome.exe"))
+        self.assertEqual(created[0][0], chrome)
+        self.assertEqual(created[0][1], page.pause.value())
+        self.assertFalse(created[0][2]["headless"])
+        self.assertEqual(created[0][2]["profile_dir"], browser_profile_dir(page.site, chrome.name))
+        self.assertEqual(visited, [
+            links[0].ozon_url, links[0].wildberries_url, links[0].yandex_market_url,
+            links[1].ozon_url, links[1].wildberries_url, links[1].yandex_market_url,
+        ])
+        self.assertIn("Загружено: 5; ошибок: 1", page.run_status.text())
+        self.assertEqual(page.state_label.text(), "Завершён")
+        self.assertIn("HTTP 503", page.log.editor.toPlainText())
+        self.assertTrue(page.start_button.isEnabled())
+        self.assertTrue(self.window.load_config_button.isEnabled())
+
+    def test_resolved_marketplace_challenges_count_as_loaded(self):
         page = self.window.pages[SITES[0]]
-        page.set_available_browsers({chrome.name: chrome})
-        page.browser.setCurrentIndex(page.browser.findData(chrome.name))
-        release = Event()
+        links = [ProductLinks(
+            "42", "https://ozon.example/42", "https://wb.example/42", "https://ya.example/42",
+        )]
+        self._load_links(page, links)
 
-        class SlowManager:
-            def __init__(self):
-                self.is_running = False
-                self.closed = False
+        class ResolvedAccess:
+            def __init__(self, *_args, **_kwargs):
+                pass
 
-            def launch(self, _name, _binary):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                pass
+
+            @staticmethod
+            def fetch(url):
+                status = (
+                    403 if url == links[0].ozon_url else
+                    498 if url == links[0].wildberries_url else 200
+                )
+                return PageSnapshot(url, url, status, "<html>Товар</html>", 1)
+
+        with patch("web_parser.ui.BrowserPageAccess", ResolvedAccess):
+            page.start_button.click()
+            self._wait_for_walk(page)
+        self.assertIn("Загружено: 3; ошибок: 0; пропущено: 0", page.run_status.text())
+        self.assertFalse(hasattr(page, "retry_button"))
+        self.assertFalse(hasattr(page, "skip_marketplace_button"))
+
+    def test_access_denial_automatically_skips_remaining_marketplace_links(self):
+        self._assert_denied_marketplace_is_skipped("ozon_url", BrowserAccessDenied(403))
+
+    def test_yandex_captcha_is_logged_and_only_yandex_links_are_skipped(self):
+        self._assert_denied_marketplace_is_skipped(
+            "yandex_market_url",
+            BrowserAccessDenied(200, "обнаружена капча Яндекс Маркета; страница недоступна."),
+        )
+
+    def test_firefox_start_uses_playwright_build_without_stock_installation(self):
+        page = self.window.pages[SITES[0]]
+        page.set_available_browsers({})
+        page.browser.setCurrentIndex(page.browser.findData("Mozilla Firefox"))
+        self._load_links(page, [ProductLinks(
+            "42", "https://ozon.example/42", "https://wb.example/42", "https://ya.example/42",
+        )])
+        selected = []
+
+        class FakeAccess:
+            def __init__(self, installation, *_args, **_kwargs):
+                selected.append(installation)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                pass
+
+            @staticmethod
+            def fetch(url):
+                return PageSnapshot(url, url, 200, "<html>Товар</html>", 1)
+
+        with patch("web_parser.ui.BrowserPageAccess", FakeAccess):
+            page.start_button.click()
+            self._wait_for_walk(page)
+        self.assertEqual(selected[0].name, "Mozilla Firefox")
+        self.assertEqual(page.state_label.text(), "Завершён")
+
+    def test_startup_error_is_shown_and_logged(self):
+        page = self.window.pages[SITES[0]]
+        self._load_links(page, [ProductLinks(
+            "42", "https://ozon.example/42", "https://wb.example/42", "https://ya.example/42",
+        )])
+
+        class FailingAccess:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def __enter__(self):
+                raise BrowserAccessError("Сборка Firefox не установлена")
+
+            def __exit__(self, *_args):
+                pass
+
+        with patch("web_parser.ui.BrowserPageAccess", FailingAccess):
+            page.start_button.click()
+            self._wait_for_walk(page)
+        self.assertIn("Сборка Firefox", page.run_status.text())
+        self.assertIn("Сборка Firefox", page.log.editor.toPlainText())
+        self.assertTrue(page.start_button.isEnabled())
+
+    def test_stop_cancels_walk_and_closes_browser_session(self):
+        page = self.window.pages[SITES[0]]
+        self._load_links(page, [ProductLinks(
+            "42", "https://ozon.example/42", "https://wb.example/42", "https://ya.example/42",
+        )])
+        entered, release = Event(), Event()
+        visited = []
+        closed = []
+
+        class SlowAccess:
+            def __init__(self, _installation, _pause, **options):
+                self.cancel_requested = options["cancel_requested"]
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                closed.append(True)
+
+            def fetch(self, url):
+                visited.append(url)
+                entered.set()
                 release.wait(3)
-                self.is_running = True
-                return "mock driver"
+                if self.cancel_requested():
+                    raise BrowserAccessCancelled("Остановлено")
+                return PageSnapshot(url, url, 200, "<html>Товар</html>", 1)
 
-            def close(self):
-                self.is_running = False
-                self.closed = True
+        with patch("web_parser.ui.BrowserPageAccess", SlowAccess):
+            page.start_button.click()
+            self.assertTrue(entered.wait(2))
+            page.stop_button.click()
+            self.assertFalse(page.stop_button.isEnabled())
+            release.set()
+            self._wait_for_walk(page)
+        self.assertEqual(visited, [page.product_links[0].ozon_url])
+        self.assertEqual(closed, [True])
+        self.assertEqual(page.state_label.text(), "Остановлен")
 
-        slow_manager = SlowManager()
-        with patch("web_parser.ui.BrowserSessionManager", return_value=slow_manager):
-            self._close_window_while_worker_runs(page.launch_browser_button.click, release)
-        self.assertTrue(slow_manager.closed)
+    def test_window_close_during_walk_does_not_block_ui(self):
+        page = self.window.pages[SITES[0]]
+        self._load_links(page, [ProductLinks(
+            "42", "https://ozon.example/42", "https://wb.example/42", "https://ya.example/42",
+        )])
+        entered, release = Event(), Event()
+        closed = []
+
+        class SlowAccess:
+            def __init__(self, _installation, _pause, **options):
+                self.cancel_requested = options["cancel_requested"]
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                closed.append(True)
+
+            def fetch(self, url):
+                entered.set()
+                release.wait(3)
+                if self.cancel_requested():
+                    raise BrowserAccessCancelled("Остановлено")
+                return PageSnapshot(url, url, 200, "<html>Товар</html>", 1)
+
+        def start_walk():
+            page.start_button.click()
+            self.assertTrue(entered.wait(2))
+
+        with patch("web_parser.ui.BrowserPageAccess", SlowAccess):
+            self._close_window_while_worker_runs(start_walk, release)
+        self.assertEqual(closed, [True])
 
 
 if __name__ == "__main__":
