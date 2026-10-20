@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QPoint, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QLineEdit
 
@@ -277,6 +277,37 @@ class InterfaceTests(unittest.TestCase):
         first.source_url.setText("https://new.example.org/products.json")
         self.assertEqual(first.product_links, ())
         self.assertEqual(first.links_preview.rowCount(), 0)
+
+    def test_links_preview_uses_narrow_id_and_clickable_full_width_urls(self):
+        page = self.window.pages[SITES[0]]
+        url = "https://ozon.ru/search/?text=" + "длинная-ссылка-" * 20
+        self._load_links(page, [ProductLinks(
+            "42", url, "https://wildberries.ru/catalog/42/detail.aspx",
+            "https://market.yandex.ru/search?text=42",
+        )])
+        self.window.show()
+        table = page.links_preview
+        self.window.tabs.currentWidget().ensureWidgetVisible(table)
+        self.app.processEvents()
+
+        self.assertAlmostEqual(table.columnWidth(0), table.viewport().width() // 16, delta=2)
+        for column in range(1, 4):
+            self.assertGreater(table.columnWidth(column), table.columnWidth(0) * 3)
+        self.assertTrue(table.wordWrap())
+        self.assertEqual(table.textElideMode(), Qt.TextElideMode.ElideNone)
+        self.assertGreater(table.rowHeight(0), table.fontMetrics().height() * 2)
+        self.assertTrue(table.item(0, 1).font().underline())
+
+        link_cell = table.visualItemRect(table.item(0, 1))
+        click_near_right_edge = QPoint(link_cell.right() - 3, link_cell.center().y())
+        with patch("web_parser.ui.QDesktopServices.openUrl", return_value=True) as open_url:
+            QTest.mouseClick(table.viewport(), Qt.MouseButton.LeftButton, pos=click_near_right_edge)
+            QTest.mouseClick(
+                table.viewport(), Qt.MouseButton.LeftButton,
+                pos=table.visualItemRect(table.item(0, 0)).center(),
+            )
+        open_url.assert_called_once()
+        self.assertEqual(open_url.call_args.args[0].toString(), url)
 
     def test_product_links_error_hides_token_and_is_logged(self):
         page = self.window.pages[SITES[0]]

@@ -6,8 +6,8 @@ from threading import Event
 from typing import Callable
 from urllib.parse import quote, quote_plus
 
-from PySide6.QtCore import QPointF, Qt, QThread, QTime, QTimer, Signal, Slot
-from PySide6.QtGui import QColor, QPaintEvent, QPainter, QPen
+from PySide6.QtCore import QPointF, Qt, QThread, QTime, QTimer, QUrl, Signal, Slot
+from PySide6.QtGui import QColor, QDesktopServices, QPaintEvent, QPainter, QPen
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QFileDialog, QFormLayout, QFrame,
     QGridLayout, QHeaderView, QHBoxLayout, QLabel, QLineEdit, QMainWindow,
@@ -283,6 +283,24 @@ class ProductLinksFetchThread(QThread):
             self.error = message
 
 
+class LinksPreviewTable(QTableWidget):
+    """Give IDs one quarter of their former equal-width column."""
+
+    def __init__(self):
+        super().__init__(0, 4)
+        header = self.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
+        for column in range(1, 4):
+            header.setSectionResizeMode(column, QHeaderView.ResizeMode.Stretch)
+        self.setColumnWidth(0, 64)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        width = max(40, self.viewport().width() // 16)
+        if self.columnWidth(0) != width:
+            self.setColumnWidth(0, width)
+
+
 class SitePage(QWidget):
     refresh_browsers_requested = Signal()
     walk_finished = Signal()
@@ -442,17 +460,20 @@ class SitePage(QWidget):
         layout.addLayout(grid)
 
         links_panel, links_layout = section("Ссылки товаров")
-        self.links_preview = QTableWidget(0, 4)
+        self.links_preview = LinksPreviewTable()
         self.links_preview.setObjectName("linksPreview")
         self.links_preview.setHorizontalHeaderLabels(
             ("ID", "Ozon", "Wildberries", "Яндекс Маркет")
         )
-        self.links_preview.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.links_preview.verticalHeader().setVisible(False)
+        self.links_preview.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         self.links_preview.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.links_preview.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.links_preview.setWordWrap(True)
+        self.links_preview.setTextElideMode(Qt.TextElideMode.ElideNone)
         self.links_preview.setAlternatingRowColors(True)
         self.links_preview.setMinimumHeight(160)
+        self.links_preview.cellClicked.connect(self._open_preview_link)
         links_layout.addWidget(self.links_preview)
         self.links_preview_hint = label("Загрузите JSON, чтобы увидеть ID и ссылки товаров.", "hint")
         links_layout.addWidget(self.links_preview_hint)
@@ -569,6 +590,12 @@ class SitePage(QWidget):
                 item = QTableWidgetItem(value or "—")
                 if value:
                     item.setToolTip(value)
+                if column > 0 and value:
+                    item.setData(Qt.ItemDataRole.UserRole, value)
+                    item.setForeground(QColor("#245fd2"))
+                    font = item.font()
+                    font.setUnderline(True)
+                    item.setFont(font)
                 self.links_preview.setItem(row, column, item)
         self.links_status.setText(f"Загружено товаров: {total}")
         if total:
@@ -580,6 +607,16 @@ class SitePage(QWidget):
             else "Все загруженные товары показаны в таблице." if total
             else "В источнике нет товаров."
         )
+
+    @Slot(int, int)
+    def _open_preview_link(self, row: int, column: int) -> None:
+        if column == 0:
+            return
+        item = self.links_preview.item(row, column)
+        if item is not None:
+            url = item.data(Qt.ItemDataRole.UserRole)
+            if isinstance(url, str):
+                QDesktopServices.openUrl(QUrl(url))
 
     def shutdown_links(self) -> None:
         """Release a completed fetch worker when the window closes."""
