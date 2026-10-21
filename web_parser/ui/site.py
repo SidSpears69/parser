@@ -1,5 +1,6 @@
 """Controls and state for one source-site tab."""
 
+from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTime, QUrl, Signal, Slot
@@ -110,6 +111,8 @@ class SitePage(QWidget):
         self.links_status = label("Ссылки ещё не загружены.", "hint")
         self.links_status.setWordWrap(True)
         source_layout.addWidget(self.links_status)
+        self.last_load_label = label("Последняя успешная загрузка: ещё не было.", "hint")
+        source_layout.addWidget(self.last_load_label)
         source_layout.addStretch()
         grid.addWidget(source, 0, 0)
 
@@ -327,6 +330,9 @@ class SitePage(QWidget):
         else:
             self._product_links = tuple(thread.links)
             self._show_product_links()
+            self.last_load_label.setText(
+                f"Последняя успешная загрузка: {datetime.now():%d.%m.%Y %H:%M:%S}"
+            )
         self._update_links_controls()
         thread.token = ""
         thread.deleteLater()

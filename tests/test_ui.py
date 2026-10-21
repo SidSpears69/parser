@@ -292,6 +292,8 @@ class InterfaceTests(unittest.TestCase):
 
     def test_product_links_load_is_per_site_and_shows_preview(self):
         first, second = (self.window.pages[site] for site in SITES[:2])
+        self.assertIn("ещё не было", first.last_load_label.text())
+        self.assertIn("ещё не было", second.last_load_label.text())
         self.assertEqual(first.source_url.text(), "")
         self.assertEqual(second.source_url.text(), "")
         self.assertFalse(first.load_links_button.isEnabled())
@@ -328,11 +330,34 @@ class InterfaceTests(unittest.TestCase):
         self.assertEqual(cell_text(2), "https://wildberries.ru/catalog/0/detail.aspx")
         self.assertEqual(cell_text(3), "https://market.yandex.ru/product/0")
         self.assertIn("21", first.links_status.text())
+        self.assertRegex(
+            first.last_load_label.text(),
+            r"Последняя успешная загрузка: \d{2}\.\d{2}\.\d{4} \d{2}:\d{2}:\d{2}",
+        )
+        self.assertIn("ещё не было", second.last_load_label.text())
         self.assertIn("первые 20 из 21", first.links_preview_hint.text())
         self.assertIn("не загружены", second.links_status.text())
         first.source_url.setText("https://new.example.org/products.json")
         self.assertEqual(first.product_links, ())
         self.assertEqual(first.links_preview.rowCount(), 0)
+
+    def test_last_successful_load_survives_failed_retry(self):
+        page = self.window.pages[SITES[0]]
+        self._load_links(page, [])
+        last_load = page.last_load_label.text()
+        self.assertNotIn("ещё не было", last_load)
+
+        with patch(
+            "web_parser.ui.workers.fetch_product_links",
+            side_effect=ProductLinksError("Временная ошибка"),
+        ):
+            page.load_links_button.click()
+            deadline = time.monotonic() + 3
+            while page.links_fetch_pending and time.monotonic() < deadline:
+                QTest.qWait(10)
+
+        self.assertIn("Не удалось загрузить", page.links_status.text())
+        self.assertEqual(page.last_load_label.text(), last_load)
 
     def test_links_preview_uses_narrow_id_and_clickable_full_width_urls(self):
         page = self.window.pages[SITES[0]]
