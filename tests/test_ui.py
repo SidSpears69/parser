@@ -226,6 +226,10 @@ class InterfaceTests(unittest.TestCase):
     def test_configuration_round_trip_restores_each_tab(self):
         first = self.window.pages[SITES[0]]
         second = self.window.pages[SITES[1]]
+        self.window.proxy_enabled.setChecked(True)
+        self.window.proxy_server.setText("http://ru-proxy.example:8080")
+        self.window.proxy_username.setText("proxy-user")
+        self.window.proxy_password.setText("proxy-secret")
         first.source_url.setText("https://first.example/products.json")
         first.token.setText("secret-token")
         first.source_schedule_enabled.setChecked(True)
@@ -245,6 +249,7 @@ class InterfaceTests(unittest.TestCase):
         first.interval_unit.setCurrentIndex(2)
         second.source_url.setText("https://second.example/products.json")
         expected = {site: page.settings() for site, page in self.window.pages.items()}
+        expected_proxy = self.window.proxy_settings()
 
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "saved.json"
@@ -252,6 +257,11 @@ class InterfaceTests(unittest.TestCase):
             raw = path.read_text(encoding="utf-8")
             self.assertNotIn("secret-token", raw)
             self.assertNotIn("secret-password", raw)
+            self.assertNotIn("proxy-secret", raw)
+            self.window.proxy_enabled.setChecked(False)
+            self.window.proxy_server.clear()
+            self.window.proxy_username.clear()
+            self.window.proxy_password.clear()
             for page in self.window.pages.values():
                 page.source_url.clear()
                 page.token.clear()
@@ -265,6 +275,30 @@ class InterfaceTests(unittest.TestCase):
         self.assertEqual(
             {site: page.settings() for site, page in self.window.pages.items()}, expected
         )
+        self.assertEqual(self.window.proxy_settings(), expected_proxy)
+
+    def test_proxy_fields_are_shared_and_disabled_until_enabled(self):
+        self.assertFalse(self.window.proxy_enabled.isChecked())
+        self.assertFalse(self.window.proxy_server.isEnabled())
+        self.window.proxy_enabled.setChecked(True)
+        self.assertTrue(self.window.proxy_server.isEnabled())
+        self.assertEqual(self.window.proxy_password.echoMode(), QLineEdit.EchoMode.Password)
+
+    def test_invalid_proxy_prevents_browser_walk(self):
+        page = self.window.pages[SITES[0]]
+        chrome = BrowserInstallation("Google Chrome", Path("C:/Browsers/Chrome/chrome.exe"))
+        page.set_available_browsers({chrome.name: chrome})
+        page.browser.setCurrentIndex(page.browser.findData(chrome.name))
+        self._load_links(page, [ProductLinks(
+            "42", "https://ozon.example/42", "https://wildberries.example/42",
+            "https://market.example/42",
+        )])
+        self.window.proxy_enabled.setChecked(True)
+        self.window.proxy_server.setText("invalid-proxy")
+        page.start_button.click()
+        self.assertFalse(page.walk_pending)
+        self.assertEqual(page.state_label.text(), "Ошибка прокси")
+        self.assertIn("Прокси", page.run_status.text())
 
     def test_invalid_config_does_not_change_any_tab(self):
         page = self.window.pages[SITES[0]]
@@ -467,6 +501,10 @@ class InterfaceTests(unittest.TestCase):
 
     def test_start_visits_all_urls_in_json_order_and_logs_page_error(self):
         page = self.window.pages[SITES[0]]
+        self.window.proxy_enabled.setChecked(True)
+        self.window.proxy_server.setText("http://ru-proxy.example:8080")
+        self.window.proxy_username.setText("proxy-user")
+        self.window.proxy_password.setText("proxy-secret")
         chrome = BrowserInstallation("Google Chrome", Path("C:/Browsers/Chrome/chrome.exe"))
         page.set_available_browsers({chrome.name: chrome})
         page.browser.setCurrentIndex(page.browser.findData(chrome.name))
@@ -507,6 +545,10 @@ class InterfaceTests(unittest.TestCase):
         self.assertEqual(created[0][0], chrome)
         self.assertEqual(created[0][1], page.pause.value())
         self.assertFalse(created[0][2]["headless"])
+        self.assertEqual(created[0][2]["proxy"], {
+            "server": "http://ru-proxy.example:8080",
+            "username": "proxy-user", "password": "proxy-secret",
+        })
         self.assertEqual(created[0][2]["profile_dir"], browser_profile_dir(page.site, chrome.name))
         self.assertEqual(visited, [
             links[0].ozon_url, links[0].wildberries_url, links[0].yandex_market_url,

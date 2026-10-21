@@ -2,6 +2,7 @@
 
 from datetime import datetime
 from pathlib import Path
+from typing import Callable
 
 from PySide6.QtCore import Qt, QTime, QUrl, Signal, Slot
 from PySide6.QtGui import QDesktopServices
@@ -34,9 +35,13 @@ class SitePage(QWidget):
     walk_state_changed = Signal()
     links_fetch_finished = Signal()
 
-    def __init__(self, site: str, parent: QWidget | None = None):
+    def __init__(
+        self, site: str, parent: QWidget | None = None,
+        *, proxy_provider: Callable[[], dict[str, str] | None] = lambda: None,
+    ):
         super().__init__(parent)
         self.site = site
+        self._proxy_provider = proxy_provider
         self._available_browsers: dict[str, BrowserInstallation] = {}
         self._walk_thread: BrowserWalkThread | None = None
         self._links_thread: ProductLinksFetchThread | None = None
@@ -451,7 +456,16 @@ class SitePage(QWidget):
             or self._links_thread is not None or self._shutting_down
         ):
             return
-        thread = BrowserWalkThread(self.site, installation, self._product_links, self.pause.value(), self)
+        try:
+            proxy = self._proxy_provider()
+        except config.ConfigError as error:
+            self.state_label.setText("Ошибка прокси")
+            self.run_status.setText(str(error))
+            return
+        thread = BrowserWalkThread(
+            self.site, installation, self._product_links, self.pause.value(), self,
+            proxy=proxy,
+        )
         self._walk_thread = thread
         self.state_label.setText("Запуск…")
         self.run_status.setText(f"Открывается {installation.name}; страниц в очереди: {len(self._product_links) * 3}.")

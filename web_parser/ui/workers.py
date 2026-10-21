@@ -20,13 +20,14 @@ class BrowserWalkThread(QThread):
 
     def __init__(
         self, site: str, installation: BrowserInstallation, links: tuple[ProductLinks, ...],
-        pause_seconds: int, parent=None,
+        pause_seconds: int, parent=None, *, proxy: dict[str, str] | None = None,
     ) -> None:
         super().__init__(parent)
         self.site = site
         self.installation = installation
         self.links = links
         self.pause_seconds = pause_seconds
+        self.proxy = proxy.copy() if proxy is not None else None
         self.loaded = 0
         self.failed = 0
         self.cancelled = False
@@ -51,6 +52,7 @@ class BrowserWalkThread(QThread):
                 self.installation, self.pause_seconds, headless=False,
                 sleep=self._pause, cancel_requested=self._stop_event.is_set,
                 profile_dir=browser_profile_dir(self.site, self.installation.name),
+                proxy=self.proxy,
             ) as access:
                 for product in self.links:
                     for marketplace, url in (

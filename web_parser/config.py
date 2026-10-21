@@ -6,11 +6,13 @@ import base64
 import binascii
 import ctypes
 from ctypes import wintypes
+from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
 import re
 import tempfile
+from urllib.parse import urlsplit
 
 
 VERSION = 1
@@ -24,6 +26,62 @@ _DPAPI_NO_UI = 0x01
 
 class ConfigError(ValueError):
     """A configuration cannot be saved or loaded safely."""
+
+
+@dataclass(frozen=True, slots=True)
+class LoadedConfig:
+    sites: dict[str, dict]
+    proxy: dict[str, str | bool]
+
+
+def default_proxy() -> dict[str, str | bool]:
+    return {"enabled": False, "server": "", "username": "", "password": ""}
+
+
+def validate_proxy(value: object) -> dict[str, str | bool]:
+    """Validate one app-wide browser proxy, without resolving its country."""
+    fields = _require_fields(value, {"enabled", "server", "username", "password"}, "Прокси")
+    enabled = fields["enabled"]
+    if type(enabled) is not bool:
+        raise ConfigError("Прокси: признак включения должен быть логическим.")
+    server = _string(fields["server"], "Прокси, адрес").strip()
+    username = _string(fields["username"], "Прокси, логин")
+    password = _string(fields["password"], "Прокси, пароль")
+    if enabled:
+        try:
+            parsed = urlsplit(server)
+            valid = (
+                parsed.scheme in {"http", "https", "socks5"}
+                and bool(parsed.hostname) and parsed.port is not None
+                and 1 <= parsed.port <= 65535
+                and not (parsed.username or parsed.password or parsed.path or parsed.query or parsed.fragment)
+                and not any(char.isspace() for char in server)
+            )
+        except ValueError:
+            valid = False
+            parsed = None
+        if not valid:
+            raise ConfigError(
+                "Прокси: укажите адрес и порт с протоколом HTTP, HTTPS или SOCKS5; "
+                "логин и пароль вводите в отдельных полях."
+            )
+        if bool(username) != bool(password):
+            raise ConfigError("Прокси: укажите и логин, и пароль либо оставьте оба поля пустыми.")
+        if parsed is not None and parsed.scheme == "socks5" and username:
+            raise ConfigError("Прокси: авторизация поддерживается только для HTTP(S)-прокси.")
+    return {"enabled": enabled, "server": server, "username": username, "password": password}
+
+
+def playwright_proxy(value: dict[str, str | bool]) -> dict[str, str] | None:
+    """Return Playwright options for an enabled validated proxy."""
+    checked = validate_proxy(value)
+    if not checked["enabled"]:
+        return None
+    options = {"server": str(checked["server"])}
+    if checked["username"]:
+        options["username"] = str(checked["username"])
+        options["password"] = str(checked["password"])
+    return options
 
 
 class _DataBlob(ctypes.Structure):
@@ -200,14 +258,22 @@ def _decrypt(value: object, location: str) -> str:
         raise ConfigError(f"{location}: повреждённое расшифрованное значение.") from error
 
 
-def save(path: str | Path, sites: dict[str, dict]) -> None:
-    """Atomically export all four tabs; token and FTP password use DPAPI CurrentUser."""
+def save(
+    path: str | Path, sites: dict[str, dict], proxy: dict[str, str | bool] | None = None,
+) -> None:
+    """Atomically export all tabs and the optional shared proxy."""
     checked = _validate_sites(sites)
+    checked_proxy = validate_proxy(proxy) if proxy is not None else None
     for settings in checked.values():
         settings["token"] = _encrypt(settings["token"])
         settings["ftp"]["password"] = _encrypt(settings["ftp"]["password"])
     try:
-        serialized = json.dumps({"version": VERSION, "sites": checked}, ensure_ascii=False, indent=2) + "\n"
+        document: dict[str, object] = {"version": VERSION, "sites": checked}
+        if checked_proxy is not None:
+            document["proxy"] = {
+                **checked_proxy, "password": _encrypt(str(checked_proxy["password"])),
+            }
+        serialized = json.dumps(document, ensure_ascii=False, indent=2) + "\n"
         destination = Path(path)
         temporary: Path | None = None
         try:
@@ -227,13 +293,13 @@ def save(path: str | Path, sites: dict[str, dict]) -> None:
         raise ConfigError(f"Не удалось сохранить файл конфигурации: {error}") from error
 
 
-def load(path: str | Path) -> dict[str, dict]:
-    """Read and fully validate a file before returning settings for any tab."""
+def load_document(path: str | Path) -> LoadedConfig:
+    """Read and fully validate sites and the shared proxy before applying either."""
     try:
         document = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
         raise ConfigError(f"Не удалось прочитать файл конфигурации: {error}") from error
-    document = _require_fields(document, {"version", "sites"}, "Конфигурация")
+    document = _require_fields(document, {"version", "sites"}, "Конфигурация", optional=("proxy",))
     if type(document["version"]) is not int or document["version"] != VERSION:
         raise ConfigError("Неподдерживаемая версия файла конфигурации.")
     encrypted_sites = _require_fields(document["sites"], set(SITES), "Сайты")
@@ -260,4 +326,18 @@ def load(path: str | Path) -> dict[str, dict]:
                 "password": _decrypt(ftp["password"], f"Настройки {site}, пароль FTP"),
             },
         }
-    return _validate_sites(plain_sites)
+    proxy = default_proxy()
+    if "proxy" in document:
+        encrypted_proxy = _require_fields(
+            document["proxy"], {"enabled", "server", "username", "password"}, "Прокси",
+        )
+        proxy = validate_proxy({
+            **encrypted_proxy,
+            "password": _decrypt(encrypted_proxy["password"], "Прокси, пароль"),
+        })
+    return LoadedConfig(_validate_sites(plain_sites), proxy)
+
+
+def load(path: str | Path) -> dict[str, dict]:
+    """Read site settings, retaining the original sites-only API."""
+    return load_document(path).sites

@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 import time
 from typing import Callable
-from urllib.parse import urlsplit
+from urllib.parse import quote, quote_plus, urlsplit
 from uuid import uuid4
 
 from playwright.sync_api import Browser, BrowserContext, Error as PlaywrightError
@@ -196,6 +196,7 @@ class BrowserPageAccess:
         sleep: Callable[[float], None] = time.sleep,
         cancel_requested: Callable[[], bool] = lambda: False,
         profile_dir: Path | None = None,
+        proxy: dict[str, str] | None = None,
     ) -> None:
         if not 0 <= pause_seconds <= 3600:
             raise ValueError("Пауза должна быть от 0 до 3600 секунд.")
@@ -208,6 +209,7 @@ class BrowserPageAccess:
         self._sleep = sleep
         self._cancel_requested = cancel_requested
         self.profile_dir = Path(profile_dir) if profile_dir is not None else None
+        self.proxy = proxy.copy() if proxy is not None else None
         self._playwright: Playwright | None = None
         self._browser: Browser | None = None
         self._context: BrowserContext | None = None
@@ -227,6 +229,7 @@ class BrowserPageAccess:
 
         try:
             self._playwright = sync_playwright().start()
+            proxy_options = {"proxy": self.proxy} if self.proxy is not None else {}
             if name == "Mozilla Firefox":
                 firefox = self._playwright.firefox
                 if not Path(firefox.executable_path).is_file():
@@ -235,17 +238,18 @@ class BrowserPageAccess:
                         ".\\.venv\\Scripts\\python.exe -m playwright install firefox."
                     )
                 if self.profile_dir is None:
-                    self._browser = firefox.launch(headless=self.headless)
+                    self._browser = firefox.launch(headless=self.headless, **proxy_options)
                 else:
                     self.profile_dir.mkdir(parents=True, exist_ok=True)
                     self._context = firefox.launch_persistent_context(
                         user_data_dir=str(self.profile_dir), headless=self.headless, locale="ru-RU",
+                        **proxy_options,
                     )
             else:
                 if self.profile_dir is None:
                     self._browser = self._playwright.chromium.launch(
                         executable_path=str(binary), headless=self.headless,
-                        chromium_sandbox=True,
+                        chromium_sandbox=True, **proxy_options,
                     )
                 else:
                     self.profile_dir.mkdir(parents=True, exist_ok=True)
@@ -256,6 +260,7 @@ class BrowserPageAccess:
                         headless=self.headless, locale="ru-RU",
                         chromium_sandbox=True,
                         timeout=_BROWSER_LAUNCH_TIMEOUT_MS,
+                        **proxy_options,
                     )
             if self._context is None and self._browser is not None:
                 self._context = self._browser.new_context(locale="ru-RU")
@@ -287,7 +292,9 @@ class BrowserPageAccess:
                 self.close()
             except BrowserAccessError:
                 pass
-            raise BrowserAccessError(f"Не удалось запустить {name} через Playwright: {error}") from error
+            raise BrowserAccessError(
+                f"Не удалось запустить {name} через Playwright: {self._safe_error(error)}"
+            ) from error
         return self
 
     def __exit__(self, _type: object, _value: object, _traceback: object) -> None:
@@ -404,7 +411,7 @@ class BrowserPageAccess:
                 raise
             except PlaywrightError as error:
                 self._check_cancelled()
-                last_problem = f"ошибка браузера: {error}"
+                last_problem = f"ошибка браузера: {self._safe_error(error)}"
         raise BrowserAccessError(
             f"Не удалось получить страницу {url}. Попыток: {self.attempts}; {last_problem}."
         )
@@ -412,6 +419,15 @@ class BrowserPageAccess:
     def _check_cancelled(self) -> None:
         if self._cancel_requested():
             raise BrowserAccessCancelled("Обход страниц остановлен пользователем.")
+
+    def _safe_error(self, error: Exception) -> str:
+        message = str(error)
+        if self.proxy is not None:
+            for credential in (self.proxy.get("password", ""), self.proxy.get("username", "")):
+                for secret in {credential, quote(credential, safe=""), quote_plus(credential)}:
+                    if secret:
+                        message = message.replace(secret, "[данные прокси скрыты]")
+        return message
 
     def close(self) -> None:
         """Release resources in reverse order, including after partial startup."""
@@ -447,4 +463,6 @@ class BrowserPageAccess:
                 if first_error is None:
                     first_error = error
         if first_error is not None:
-            raise BrowserAccessError(f"Не удалось закрыть сеанс Playwright: {first_error}") from first_error
+            raise BrowserAccessError(
+                f"Не удалось закрыть сеанс Playwright: {self._safe_error(first_error)}"
+            ) from first_error

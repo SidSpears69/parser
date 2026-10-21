@@ -4,14 +4,14 @@ from pathlib import Path
 
 from PySide6.QtCore import QTimer, Slot
 from PySide6.QtWidgets import (
-    QAbstractButton, QComboBox, QFileDialog, QFrame, QHBoxLayout, QMainWindow,
+    QAbstractButton, QCheckBox, QComboBox, QFileDialog, QFrame, QHBoxLayout, QMainWindow,
     QMessageBox, QPushButton, QScrollArea, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from web_parser import config
 from web_parser.browser_discovery import discover_browsers
 from web_parser.ui.site import SitePage
-from web_parser.ui.widgets import ClickableCursorFilter, label
+from web_parser.ui.widgets import ClickableCursorFilter, field, form, label, section
 
 SITES = config.SITES
 
@@ -51,6 +51,26 @@ class MainWindow(QMainWindow):
         config_layout.addWidget(self.save_config_button)
         layout.addLayout(config_layout)
 
+        self.proxy_section, proxy_layout = section("Прокси для браузера")
+        self.proxy_enabled = QCheckBox("Использовать прокси при обходе маркетплейсов")
+        self.proxy_enabled.setObjectName("proxyEnabled")
+        proxy_layout.addWidget(self.proxy_enabled)
+        proxy_form = form()
+        self.proxy_server = field("Протокол, адрес и порт прокси", "proxyServer")
+        self.proxy_username = field("Логин (если требуется)", "proxyUsername")
+        self.proxy_password = field("Пароль (если требуется)", "proxyPassword", secret=True)
+        credentials = QHBoxLayout()
+        credentials.addWidget(self.proxy_username)
+        credentials.addWidget(self.proxy_password)
+        self.proxy_username.setAccessibleName("Логин прокси")
+        self.proxy_password.setAccessibleName("Пароль прокси")
+        proxy_form.addRow("Адрес", self.proxy_server)
+        proxy_form.addRow("Логин / пароль", credentials)
+        proxy_layout.addLayout(proxy_form)
+        self.proxy_enabled.toggled.connect(self._toggle_proxy)
+        self._toggle_proxy(False)
+        layout.addWidget(self.proxy_section)
+
         self.tabs = QTabWidget()
         self.tabs.setObjectName("siteTabs")
         self.tabs.setDocumentMode(True)
@@ -58,7 +78,7 @@ class MainWindow(QMainWindow):
         self._close_pending = False
         self.pages: dict[str, SitePage] = {}
         for site in SITES:
-            page = SitePage(site)
+            page = SitePage(site, proxy_provider=self._browser_proxy)
             self.pages[site] = page
             scroll = QScrollArea()
             scroll.setWidgetResizable(True)
@@ -123,18 +143,44 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(0, self.close)
 
     def save_config_to(self, path: str | Path) -> None:
-        config.save(path, {site: page.settings() for site, page in self.pages.items()})
+        config.save(
+            path, {site: page.settings() for site, page in self.pages.items()},
+            self.proxy_settings(),
+        )
         self.statusBar().showMessage(f"Настройки сохранены в {Path(path).name}")
 
     def load_config_from(self, path: str | Path) -> None:
         if any(page.walk_pending for page in self.pages.values()):
             raise ValueError("Остановите обход страниц перед загрузкой настроек.")
-        settings_by_site = config.load(path)
-        if set(settings_by_site) != set(SITES):
+        loaded = config.load_document(path)
+        if set(loaded.sites) != set(SITES):
             raise ValueError("Файл должен содержать настройки всех четырёх сайтов")
         for site in SITES:
-            self.pages[site].apply_settings(settings_by_site[site])
+            self.pages[site].apply_settings(loaded.sites[site])
+        self._apply_proxy_settings(loaded.proxy)
         self.statusBar().showMessage(f"Настройки загружены из {Path(path).name}")
+
+    def proxy_settings(self) -> dict[str, str | bool]:
+        return {
+            "enabled": self.proxy_enabled.isChecked(),
+            "server": self.proxy_server.text().strip(),
+            "username": self.proxy_username.text(),
+            "password": self.proxy_password.text(),
+        }
+
+    def _browser_proxy(self) -> dict[str, str] | None:
+        return config.playwright_proxy(self.proxy_settings())
+
+    def _apply_proxy_settings(self, settings: dict[str, str | bool]) -> None:
+        self.proxy_enabled.setChecked(bool(settings["enabled"]))
+        self.proxy_server.setText(str(settings["server"]))
+        self.proxy_username.setText(str(settings["username"]))
+        self.proxy_password.setText(str(settings["password"]))
+
+    @Slot(bool)
+    def _toggle_proxy(self, enabled: bool) -> None:
+        for widget in (self.proxy_server, self.proxy_username, self.proxy_password):
+            widget.setEnabled(enabled)
 
     def _choose_save_config(self) -> None:
         path, _ = QFileDialog.getSaveFileName(
@@ -160,6 +206,6 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def _update_config_controls(self) -> None:
-        self.load_config_button.setEnabled(
-            not any(page.walk_pending for page in self.pages.values()) and not self._close_pending
-        )
+        editable = not any(page.walk_pending for page in self.pages.values()) and not self._close_pending
+        self.load_config_button.setEnabled(editable)
+        self.proxy_section.setEnabled(editable)

@@ -64,6 +64,33 @@ class BrowserAccessTests(unittest.TestCase):
         self.browser.close.assert_called_once_with()
         self.playwright.stop.assert_called_once_with()
 
+    def test_authenticated_proxy_is_passed_to_chromium_launch(self):
+        proxy = {
+            "server": "http://ru-proxy.example:8080",
+            "username": "user", "password": "secret",
+        }
+        with BrowserPageAccess(CHROME, 2, proxy=proxy):
+            pass
+        self.playwright.chromium.launch.assert_called_once_with(
+            executable_path=str(BINARY), headless=False,
+            chromium_sandbox=True, proxy=proxy,
+        )
+
+    def test_proxy_credentials_are_hidden_in_launch_errors(self):
+        proxy = {
+            "server": "http://ru-proxy.example:8080",
+            "username": "proxy-user", "password": "secret+password",
+        }
+        self.playwright.chromium.launch.side_effect = PlaywrightError(
+            "Proxy rejected proxy-user / secret+password / secret%2Bpassword"
+        )
+        with self.assertRaises(BrowserAccessError) as caught:
+            with BrowserPageAccess(CHROME, 2, proxy=proxy):
+                pass
+        self.assertNotIn("proxy-user", str(caught.exception))
+        self.assertNotIn("secret+password", str(caught.exception))
+        self.assertNotIn("secret%2Bpassword", str(caught.exception))
+
     def test_empty_page_is_retried_after_pause(self):
         self.page.wait_for_function.side_effect = [PlaywrightTimeoutError("empty"), None]
         with self.access() as access:
@@ -227,6 +254,32 @@ class BrowserAccessTests(unittest.TestCase):
         self.page.close.assert_called_once_with()
         context.close.assert_called_once_with()
         self.assertEqual(result.status, 200)
+
+    def test_proxy_is_passed_to_persistent_chromium_context(self):
+        with tempfile.TemporaryDirectory() as folder:
+            context = self.playwright.chromium.launch_persistent_context.return_value
+            context.pages = [self.page]
+            proxy = {"server": "http://ru-proxy.example:8080"}
+            with BrowserPageAccess(CHROME, 1, profile_dir=Path(folder), proxy=proxy):
+                pass
+        self.playwright.chromium.launch_persistent_context.assert_called_once_with(
+            user_data_dir=folder, executable_path=str(BINARY),
+            headless=False, locale="ru-RU", chromium_sandbox=True,
+            timeout=20_000, proxy=proxy,
+        )
+
+    def test_proxy_is_passed_to_persistent_firefox_context(self):
+        with tempfile.TemporaryDirectory() as folder:
+            firefox = BrowserInstallation("Mozilla Firefox", BINARY)
+            self.playwright.firefox.executable_path = str(BINARY)
+            context = self.playwright.firefox.launch_persistent_context.return_value
+            context.pages = [self.page]
+            proxy = {"server": "socks5://ru-proxy.example:1080"}
+            with BrowserPageAccess(firefox, 1, profile_dir=Path(folder), proxy=proxy):
+                pass
+        self.playwright.firefox.launch_persistent_context.assert_called_once_with(
+            user_data_dir=folder, headless=False, locale="ru-RU", proxy=proxy,
+        )
 
     def test_yandex_archives_saved_tabs_before_reopening_its_profile(self):
         with tempfile.TemporaryDirectory() as folder:

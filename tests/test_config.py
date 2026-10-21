@@ -55,6 +55,46 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(original, sample_sites(), "Export must not change the caller's data")
 
     @unittest.skipUnless(os.name == "nt", "Windows DPAPI required")
+    def test_shared_proxy_round_trip_encrypts_password(self):
+        sites = sample_sites()
+        proxy = {
+            "enabled": True, "server": "http://ru-proxy.example:8080",
+            "username": "proxy-user", "password": "proxy-secret-пароль",
+        }
+        config.save(self.path, sites, proxy)
+        saved = self.path.read_text(encoding="utf-8")
+        loaded = config.load_document(self.path)
+        self.assertEqual(loaded.sites, sites)
+        self.assertEqual(loaded.proxy, proxy)
+        self.assertNotIn(proxy["password"], saved)
+        self.assertEqual(config.playwright_proxy(loaded.proxy), {
+            "server": proxy["server"], "username": proxy["username"],
+            "password": proxy["password"],
+        })
+
+    @unittest.skipUnless(os.name == "nt", "Windows DPAPI required")
+    def test_old_config_defaults_to_no_proxy(self):
+        config.save(self.path, sample_sites())
+        loaded = config.load_document(self.path)
+        self.assertEqual(loaded.proxy, config.default_proxy())
+        self.assertIsNone(config.playwright_proxy(loaded.proxy))
+
+    def test_invalid_enabled_proxy_does_not_change_file(self):
+        self.path.write_text("existing configuration", encoding="utf-8")
+        for server, username, password in (
+            ("", "", ""),
+            ("http://user:password@proxy.example:8080", "", ""),
+            ("http://proxy.example:8080/path", "", ""),
+            ("socks5://proxy.example:1080", "user", "password"),
+            ("http://proxy.example:8080", "user", ""),
+        ):
+            with self.subTest(server=server, username=username):
+                proxy = {"enabled": True, "server": server, "username": username, "password": password}
+                with self.assertRaises(config.ConfigError):
+                    config.save(self.path, sample_sites(), proxy)
+                self.assertEqual(self.path.read_text(encoding="utf-8"), "existing configuration")
+
+    @unittest.skipUnless(os.name == "nt", "Windows DPAPI required")
     def test_corrupt_later_site_rejects_complete_import(self):
         config.save(self.path, sample_sites())
         saved = json.loads(self.path.read_text(encoding="utf-8"))
