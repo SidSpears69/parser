@@ -12,6 +12,7 @@ from web_parser.browser_access import (
     BrowserPageAccess, browser_profile_dir,
 )
 from web_parser.browser_discovery import BrowserInstallation
+from web_parser.config import BROWSERS
 
 
 BINARY = Path(__file__)
@@ -219,11 +220,85 @@ class BrowserAccessTests(unittest.TestCase):
             user_data_dir=str(profile), executable_path=str(BINARY),
             headless=False, locale="ru-RU",
             args=["--disable-blink-features=AutomationControlled"],
+            timeout=20_000,
         )
         self.stealth.assert_not_called()
         context.new_page.assert_not_called()
+        self.page.close.assert_called_once_with()
         context.close.assert_called_once_with()
         self.assertEqual(result.status, 200)
+
+    def test_yandex_archives_saved_tabs_before_reopening_its_profile(self):
+        with tempfile.TemporaryDirectory() as folder:
+            profile = Path(folder) / "yandex"
+            sessions = profile / "Default" / "Sessions"
+            sessions.mkdir(parents=True)
+            (sessions / "Session_1").write_bytes(b"stale tab data")
+            cookies = profile / "Default" / "Network" / "Cookies"
+            cookies.parent.mkdir()
+            cookies.write_bytes(b"keep browser state")
+
+            context = self.playwright.chromium.launch_persistent_context.return_value
+            context.pages = [self.page]
+
+            def check_profile(**_options):
+                self.assertFalse(sessions.exists())
+                self.assertEqual(cookies.read_bytes(), b"keep browser state")
+                archives = list((profile / "WebParserSavedSessions").iterdir())
+                self.assertEqual(len(archives), 1)
+                self.assertEqual((archives[0] / "Session_1").read_bytes(), b"stale tab data")
+                return context
+
+            self.playwright.chromium.launch_persistent_context.side_effect = check_profile
+            installation = BrowserInstallation("Яндекс Браузер", BINARY)
+            with BrowserPageAccess(installation, 0, profile_dir=profile):
+                pass
+
+        self.playwright.chromium.launch_persistent_context.assert_called_once()
+
+    def test_browser_launch_timeout_has_a_short_error(self):
+        with tempfile.TemporaryDirectory() as folder:
+            self.playwright.chromium.launch_persistent_context.side_effect = (
+                PlaywrightTimeoutError("long Playwright call log")
+            )
+            installation = BrowserInstallation("Яндекс Браузер", BINARY)
+            with self.assertRaisesRegex(BrowserAccessError, "не ответил за 20 секунд") as caught:
+                with BrowserPageAccess(installation, 0, profile_dir=Path(folder)):
+                    pass
+        self.assertNotIn("long Playwright call log", str(caught.exception))
+        self.playwright.stop.assert_called_once_with()
+
+    def test_repeated_persistent_runs_close_old_tabs_in_every_browser(self):
+        with tempfile.TemporaryDirectory() as folder:
+            for name in BROWSERS:
+                with self.subTest(browser=name):
+                    browser_type = (
+                        self.playwright.firefox if name == "Mozilla Firefox"
+                        else self.playwright.chromium
+                    )
+                    if name == "Mozilla Firefox":
+                        browser_type.executable_path = str(BINARY)
+                    first_context, second_context = Mock(), Mock()
+                    first_page, next_page, old_page = Mock(), Mock(), Mock()
+                    first_context.pages = [first_page]
+                    second_context.pages = [next_page, old_page]
+                    old_page.close.side_effect = lambda: second_context.pages.remove(old_page)
+                    browser_type.launch_persistent_context.side_effect = [
+                        first_context, second_context,
+                    ]
+                    profile = Path(folder) / name.replace(" ", "_")
+                    installation = BrowserInstallation(name, BINARY)
+
+                    with BrowserPageAccess(installation, 0, profile_dir=profile):
+                        first_page.close.assert_not_called()
+                    first_page.close.assert_called_once_with()
+                    first_context.close.assert_called_once_with()
+
+                    with BrowserPageAccess(installation, 0, profile_dir=profile):
+                        old_page.close.assert_called_once_with()
+                        next_page.close.assert_not_called()
+                    next_page.close.assert_called_once_with()
+                    second_context.close.assert_called_once_with()
 
     def test_profile_paths_are_separate_by_site_and_browser(self):
         first = browser_profile_dir("sail-master.ru", "Mozilla Firefox")

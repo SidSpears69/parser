@@ -8,6 +8,7 @@ from pathlib import Path
 import time
 from typing import Callable
 from urllib.parse import urlsplit
+from uuid import uuid4
 
 from playwright.sync_api import Browser, BrowserContext, Error as PlaywrightError
 from playwright.sync_api import Page, Playwright, TimeoutError as PlaywrightTimeoutError, sync_playwright
@@ -25,6 +26,7 @@ _YANDEX_SEARCH_TIMEOUT_MS = 10_000
 _YANDEX_SETTLE_MS = 750
 _MAX_ATTEMPTS = 3
 _CHROMIUM_ARGS = ["--disable-blink-features=AutomationControlled"]
+_BROWSER_LAUNCH_TIMEOUT_MS = 20_000
 _YANDEX_CAPTCHA_CHECK = """() => {
     const title = document.title || '';
     const text = (document.body?.innerText || '').slice(0, 3000).replace(/\\s+/g, ' ');
@@ -130,6 +132,27 @@ def browser_profile_dir(site: str, browser: str) -> Path:
     return base / "WebParser" / "BrowserProfiles" / site_slug / browser_slug
 
 
+def _archive_yandex_saved_tabs(profile_dir: Path) -> None:
+    """Keep old tabs recoverable while preventing Yandex's stalled restore."""
+    sessions = profile_dir / "Default" / "Sessions"
+    if sessions.is_symlink():
+        raise BrowserAccessError(f"Недопустимый каталог сохранённых вкладок: {sessions}")
+    if not sessions.exists():
+        return
+    if not sessions.is_dir() or not sessions.resolve().is_relative_to(profile_dir.resolve()):
+        raise BrowserAccessError(f"Недопустимый каталог сохранённых вкладок: {sessions}")
+    archive_dir = profile_dir / "WebParserSavedSessions"
+    try:
+        archive_dir.mkdir(exist_ok=True)
+        if not archive_dir.resolve().is_relative_to(profile_dir.resolve()):
+            raise BrowserAccessError(f"Недопустимый каталог архива вкладок: {archive_dir}")
+        sessions.rename(archive_dir / uuid4().hex)
+    except OSError as error:
+        raise BrowserAccessError(
+            f"Не удалось сохранить прежние вкладки Яндекс.Браузера: {error}"
+        ) from error
+
+
 def _firefox_stealth() -> Stealth:
     """Hide the automation flag without adding Chromium-only browser properties."""
     return Stealth(
@@ -226,9 +249,12 @@ class BrowserPageAccess:
                     )
                 else:
                     self.profile_dir.mkdir(parents=True, exist_ok=True)
+                    if name == "Яндекс Браузер":
+                        _archive_yandex_saved_tabs(self.profile_dir)
                     self._context = self._playwright.chromium.launch_persistent_context(
                         user_data_dir=str(self.profile_dir), executable_path=str(binary),
                         headless=self.headless, locale="ru-RU", args=_CHROMIUM_ARGS,
+                        timeout=_BROWSER_LAUNCH_TIMEOUT_MS,
                     )
             if self._context is None and self._browser is not None:
                 self._context = self._browser.new_context(locale="ru-RU")
@@ -236,8 +262,10 @@ class BrowserPageAccess:
                 raise BrowserAccessError("Не удалось создать контекст браузера.")
             if name == "Mozilla Firefox":
                 _firefox_stealth().apply_stealth_sync(self._context)
-            pages = self._context.pages if self.profile_dir is not None else []
+            pages = list(self._context.pages) if self.profile_dir is not None else []
             self._page = pages[0] if pages else self._context.new_page()
+            for stale_page in pages[1:]:
+                stale_page.close()
             self._navigated_once = False
         except BrowserAccessError:
             try:
@@ -245,6 +273,15 @@ class BrowserPageAccess:
             except BrowserAccessError:
                 pass
             raise
+        except PlaywrightTimeoutError as error:
+            try:
+                self.close()
+            except BrowserAccessError:
+                pass
+            seconds = _BROWSER_LAUNCH_TIMEOUT_MS // 1000
+            raise BrowserAccessError(
+                f"Не удалось запустить {name}: браузер не ответил за {seconds} секунд."
+            ) from error
         except (PlaywrightError, OSError) as error:
             try:
                 self.close()
@@ -384,6 +421,18 @@ class BrowserPageAccess:
         self._page = None
         self._navigated_once = False
         first_error: PlaywrightError | OSError | None = None
+        if context is not None and self.profile_dir is not None:
+            try:
+                pages = list(context.pages)
+            except (PlaywrightError, OSError) as error:
+                pages = []
+                first_error = error
+            for page in pages:
+                try:
+                    page.close()
+                except (PlaywrightError, OSError) as error:
+                    if first_error is None:
+                        first_error = error
         closers = (
             context.close if context is not None else None,
             browser.close if browser is not None else None,

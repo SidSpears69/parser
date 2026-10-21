@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QPoint, Qt
+from PySide6.QtCore import QPoint, Qt, QTime
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QLineEdit
 
@@ -54,7 +54,7 @@ class InterfaceTests(unittest.TestCase):
     def _load_links(self, page, links: list[ProductLinks]) -> None:
         page.source_url.setText("https://example.org/products.json")
         page.token.setText("private-token")
-        with patch("web_parser.ui.fetch_product_links", return_value=links):
+        with patch("web_parser.ui.workers.fetch_product_links", return_value=links):
             page.load_links_button.click()
             deadline = time.monotonic() + 3
             while page.links_fetch_pending and time.monotonic() < deadline:
@@ -67,8 +67,8 @@ class InterfaceTests(unittest.TestCase):
             QTest.qWait(10)
         self.assertFalse(page.walk_pending)
 
-    def _assert_denied_marketplace_is_skipped(
-        self, blocked_url_field: str, denial: BrowserAccessDenied,
+    def _assert_denied_marketplace_links_are_tried_individually(
+        self, url_field: str, denial: BrowserAccessDenied,
     ) -> None:
         page = self.window.pages[SITES[0]]
         links = [ProductLinks(
@@ -76,8 +76,7 @@ class InterfaceTests(unittest.TestCase):
             f"https://market.yandex.ru/search?text={index}",
         ) for index in (1, 2)]
         self._load_links(page, links)
-        blocked_url = getattr(links[0], blocked_url_field)
-        skipped_url = getattr(links[1], blocked_url_field)
+        denied_urls = {getattr(product, url_field) for product in links}
         visited = []
 
         class DeniedAccess:
@@ -93,20 +92,24 @@ class InterfaceTests(unittest.TestCase):
             @staticmethod
             def fetch(url):
                 visited.append(url)
-                if url == blocked_url:
+                if url in denied_urls:
                     raise denial
                 return PageSnapshot(url, url, 200, "<html>Товар</html>", 1)
 
-        with patch("web_parser.ui.BrowserPageAccess", DeniedAccess):
+        with patch("web_parser.ui.workers.BrowserPageAccess", DeniedAccess):
             page.start_button.click()
             self._wait_for_walk(page)
-        self.assertNotIn(skipped_url, visited)
-        self.assertEqual(len(visited), 5)
-        self.assertIn("Загружено: 4; ошибок: 1; пропущено: 1", page.run_status.text())
-        self.assertEqual(page.log.editor.document().blockCount(), 1)
+        self.assertEqual(visited, [
+            links[0].ozon_url, links[0].wildberries_url, links[0].yandex_market_url,
+            links[1].ozon_url, links[1].wildberries_url, links[1].yandex_market_url,
+        ])
+        self.assertIn("Загружено: 4; ошибок: 2", page.run_status.text())
+        self.assertEqual(page.log.editor.document().blockCount(), 2)
         log = page.log.editor.toPlainText()
-        self.assertIn(str(denial), log)
-        self.assertIn(blocked_url, log)
+        self.assertEqual(log.count(str(denial)), 2)
+        for product in links:
+            self.assertIn(getattr(product, url_field), log)
+        self.assertNotIn("пропущены", log)
 
     def test_tabs_keep_independent_values(self):
         self.assertEqual(self.window.tabs.count(), 4)
@@ -116,30 +119,60 @@ class InterfaceTests(unittest.TestCase):
         first.source_url.setText("https://example.org/data.json")
         first.ftp_port.setValue(2121)
         first.source_schedule_enabled.setChecked(True)
+        first.source_schedule_time.setTime(QTime(6, 15))
+        first.source_schedule_interval.setValue(2)
+        first.source_schedule_unit.setCurrentIndex(2)
         self.window.tabs.setCurrentIndex(1)
         second.source_url.setText("https://other.example.org/data.json")
+        second.source_schedule_time.setTime(QTime(7, 40))
+        second.source_schedule_interval.setValue(4)
         self.window.tabs.setCurrentIndex(0)
         self.assertEqual(first.settings()["source_url"], "https://example.org/data.json")
         self.assertEqual(first.settings()["ftp"]["port"], 2121)
         self.assertEqual(second.settings()["ftp"]["port"], 21)
         self.assertTrue(first.settings()["source_schedule_enabled"])
         self.assertFalse(second.settings()["source_schedule_enabled"])
+        self.assertEqual(first.settings()["source_schedule_time"], "06:15")
+        self.assertEqual(second.settings()["source_schedule_time"], "07:40")
+        self.assertEqual(first.settings()["source_schedule_interval"], 2)
+        self.assertEqual(first.settings()["source_schedule_unit"], "weeks")
+        self.assertEqual(second.settings()["source_schedule_interval"], 4)
         self.assertNotEqual(first.settings()["source_url"], second.settings()["source_url"])
 
     def test_schedule_toggle_and_secret_fields(self):
         page = self.window.pages[SITES[0]]
         self.assertFalse(page.start_time.isEnabled())
+        self.assertFalse(page.source_schedule_time.isEnabled())
+        self.assertFalse(page.source_schedule_interval.isEnabled())
+        self.assertFalse(page.source_schedule_unit.isEnabled())
         self.assertFalse(page.source_schedule_enabled.isChecked())
         page.source_schedule_enabled.setChecked(True)
         self.assertTrue(page.settings()["source_schedule_enabled"])
+        self.assertTrue(page.source_schedule_time.isEnabled())
+        self.assertTrue(page.source_schedule_interval.isEnabled())
+        self.assertTrue(page.source_schedule_unit.isEnabled())
         self.assertFalse(page.start_time.isEnabled())
+        page.source_schedule_time.setTime(QTime(7, 15))
+        page.source_schedule_interval.setValue(2)
+        page.source_schedule_unit.setCurrentIndex(2)
+        self.assertEqual(page.settings()["source_schedule_time"], "07:15")
+        self.assertEqual(page.settings()["source_schedule_interval"], 2)
+        self.assertEqual(page.settings()["source_schedule_unit"], "weeks")
+        self.assertEqual(page.settings()["schedule"]["start_time"], "22:00")
         page.schedule_enabled.setChecked(True)
         self.assertTrue(page.start_time.isEnabled())
+        page.start_time.setTime(QTime(8, 30))
+        self.assertEqual(page.settings()["source_schedule_time"], "07:15")
         self.assertTrue(page.interval.isEnabled())
         page.interval.setValue(3)
         page.interval_unit.setCurrentIndex(0)
+        self.assertEqual(page.settings()["source_schedule_interval"], 2)
+        self.assertEqual(page.settings()["source_schedule_unit"], "weeks")
         self.assertEqual(page.settings()["schedule"]["unit"], "hours")
         self.assertEqual(page.settings()["schedule"]["interval"], 3)
+        page.source_schedule_enabled.setChecked(False)
+        self.assertFalse(page.source_schedule_interval.isEnabled())
+        self.assertTrue(page.interval.isEnabled())
         self.assertEqual(page.token.echoMode(), QLineEdit.EchoMode.Password)
         self.assertEqual(page.ftp_password.echoMode(), QLineEdit.EchoMode.Password)
 
@@ -196,6 +229,9 @@ class InterfaceTests(unittest.TestCase):
         first.source_url.setText("https://first.example/products.json")
         first.token.setText("secret-token")
         first.source_schedule_enabled.setChecked(True)
+        first.source_schedule_time.setTime(QTime(7, 15))
+        first.source_schedule_interval.setValue(2)
+        first.source_schedule_unit.setCurrentIndex(0)
         first.browser.setCurrentIndex(2)
         first.pause.setValue(9)
         first.ftp_host.setText("ftp.example.org")
@@ -221,6 +257,9 @@ class InterfaceTests(unittest.TestCase):
                 page.token.clear()
                 page.ftp_password.clear()
                 page.source_schedule_enabled.setChecked(False)
+                page.source_schedule_time.setTime(QTime(22, 0))
+                page.source_schedule_interval.setValue(1)
+                page.source_schedule_unit.setCurrentIndex(1)
             self.window.load_config_from(path)
 
         self.assertEqual(
@@ -239,7 +278,7 @@ class InterfaceTests(unittest.TestCase):
 
     def test_browser_refresh_shows_installations_without_changing_saved_names(self):
         chrome = BrowserInstallation("Google Chrome", Path("C:/Browsers/Chrome/chrome.exe"))
-        with patch("web_parser.ui.discover_browsers", return_value={chrome.name: chrome}) as discover:
+        with patch("web_parser.ui.main_window.discover_browsers", return_value={chrome.name: chrome}) as discover:
             self.window.pages[SITES[0]].refresh_browsers_button.click()
         discover.assert_called_once_with()
         for page in self.window.pages.values():
@@ -268,7 +307,7 @@ class InterfaceTests(unittest.TestCase):
             )
             for index in range(21)
         ]
-        with patch("web_parser.ui.fetch_product_links", return_value=expected) as fetch:
+        with patch("web_parser.ui.workers.fetch_product_links", return_value=expected) as fetch:
             first.load_links_button.click()
             deadline = time.monotonic() + 3
             while first.links_fetch_pending and time.monotonic() < deadline:
@@ -328,7 +367,7 @@ class InterfaceTests(unittest.TestCase):
         self.assertFalse(link_item.font().underline())
         self.assertEqual(link_item.foreground().color().name(), "#245fd2")
         self.assertEqual(link_item.data(Qt.ItemDataRole.BackgroundRole), None)
-        with patch("web_parser.ui.QDesktopServices.openUrl", return_value=True) as open_url:
+        with patch("web_parser.ui.site.QDesktopServices.openUrl", return_value=True) as open_url:
             QTest.mouseClick(table.viewport(), Qt.MouseButton.LeftButton, pos=click_near_right_edge)
             QTest.mouseClick(
                 table.viewport(), Qt.MouseButton.LeftButton,
@@ -342,7 +381,7 @@ class InterfaceTests(unittest.TestCase):
         page.source_url.setText("https://example.org/products.json")
         page.token.setText("secret token+")
         with patch(
-            "web_parser.ui.fetch_product_links",
+            "web_parser.ui.workers.fetch_product_links",
             side_effect=ProductLinksError("Отказано для secret token+ / secret%20token%2B"),
         ):
             page.load_links_button.click()
@@ -372,7 +411,7 @@ class InterfaceTests(unittest.TestCase):
                 "https://market.yandex.ru/search?q=42",
             )]
 
-        with patch("web_parser.ui.fetch_product_links", side_effect=slow_fetch):
+        with patch("web_parser.ui.workers.fetch_product_links", side_effect=slow_fetch):
             page.load_links_button.click()
             page.source_url.setText("https://new.example.org/products.json")
             release.set()
@@ -398,7 +437,7 @@ class InterfaceTests(unittest.TestCase):
                 "https://market.yandex.ru/product/42",
             )]
 
-        with patch("web_parser.ui.fetch_product_links", side_effect=slow_fetch):
+        with patch("web_parser.ui.workers.fetch_product_links", side_effect=slow_fetch):
             self._close_window_while_worker_runs(page.load_links_button.click, release)
 
     def test_start_visits_all_urls_in_json_order_and_logs_page_error(self):
@@ -434,7 +473,7 @@ class InterfaceTests(unittest.TestCase):
                     raise BrowserAccessError("HTTP 503")
                 return PageSnapshot(url, url, 200, "<html>Товар</html>", 1)
 
-        with patch("web_parser.ui.BrowserPageAccess", FakeAccess):
+        with patch("web_parser.ui.workers.BrowserPageAccess", FakeAccess):
             page.start_button.click()
             self.assertFalse(page.start_button.isEnabled())
             self.assertFalse(self.window.load_config_button.isEnabled())
@@ -453,6 +492,68 @@ class InterfaceTests(unittest.TestCase):
         self.assertIn("HTTP 503", page.log.editor.toPlainText())
         self.assertTrue(page.start_button.isEnabled())
         self.assertTrue(self.window.load_config_button.isEnabled())
+
+    def test_long_walk_url_wraps_without_expanding_the_window(self):
+        page = self.window.pages[SITES[0]]
+        long_url = "https://ozon.example/search/?text=" + "x" * 600
+        chrome = BrowserInstallation(
+            "Google Chrome", Path("C:/Browsers/" + "x" * 400 + "/chrome.exe"),
+        )
+        page.set_available_browsers({chrome.name: chrome})
+        page.browser.setCurrentIndex(page.browser.findData(chrome.name))
+        self._load_links(page, [ProductLinks(
+            "42", long_url, "https://wb.example/42", "https://market.example/42",
+        )])
+        self.window.resize(1440, 900)
+        self.window.show()
+        self.app.processEvents()
+        scroll = self.window.tabs.currentWidget()
+        browser_panel = page.run_status.parentWidget()
+        initial_panel_width = browser_panel.width()
+        initial_horizontal_scroll = scroll.horizontalScrollBar().maximum()
+        self.assertLess(initial_horizontal_scroll, 300)
+        self.assertGreater(
+            page.browser_path_label.height(), page.browser_path_label.fontMetrics().height() * 2,
+        )
+        release = Event()
+        entered = Event()
+
+        class PausedAccess:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                pass
+
+            @staticmethod
+            def fetch(url):
+                if url == long_url:
+                    entered.set()
+                    release.wait(3)
+                return PageSnapshot(url, url, 200, "<html>Товар</html>", 1)
+
+        try:
+            with patch("web_parser.ui.workers.BrowserPageAccess", PausedAccess):
+                page.start_button.click()
+                deadline = time.monotonic() + 3
+                while (
+                    not entered.is_set() or "Открывается Ozon" not in page.run_status.text()
+                ) and time.monotonic() < deadline:
+                    QTest.qWait(10)
+                self.assertTrue(entered.is_set())
+                self.assertIn("Открывается Ozon", page.run_status.text())
+                self.app.processEvents()
+                self.assertEqual(page.run_status.text().replace("\u200b", "").split(": ", 1)[1], long_url)
+                self.assertGreater(page.run_status.height(), page.run_status.fontMetrics().height() * 3)
+                self.assertEqual(browser_panel.width(), initial_panel_width)
+                self.assertLessEqual(scroll.horizontalScrollBar().maximum(), initial_horizontal_scroll)
+                self.assertEqual(self.window.width(), 1440)
+        finally:
+            release.set()
+            self._wait_for_walk(page)
 
     def test_resolved_marketplace_challenges_count_as_loaded(self):
         page = self.window.pages[SITES[0]]
@@ -479,18 +580,25 @@ class InterfaceTests(unittest.TestCase):
                 )
                 return PageSnapshot(url, url, status, "<html>Товар</html>", 1)
 
-        with patch("web_parser.ui.BrowserPageAccess", ResolvedAccess):
+        with patch("web_parser.ui.workers.BrowserPageAccess", ResolvedAccess):
             page.start_button.click()
             self._wait_for_walk(page)
-        self.assertIn("Загружено: 3; ошибок: 0; пропущено: 0", page.run_status.text())
+        self.assertIn("Загружено: 3; ошибок: 0", page.run_status.text())
         self.assertFalse(hasattr(page, "retry_button"))
         self.assertFalse(hasattr(page, "skip_marketplace_button"))
 
-    def test_access_denial_automatically_skips_remaining_marketplace_links(self):
-        self._assert_denied_marketplace_is_skipped("ozon_url", BrowserAccessDenied(403))
+    def test_ozon_denial_is_logged_for_each_link_without_skipping(self):
+        self._assert_denied_marketplace_links_are_tried_individually(
+            "ozon_url", BrowserAccessDenied(403),
+        )
 
-    def test_yandex_captcha_is_logged_and_only_yandex_links_are_skipped(self):
-        self._assert_denied_marketplace_is_skipped(
+    def test_wildberries_denial_is_logged_for_each_link_without_skipping(self):
+        self._assert_denied_marketplace_links_are_tried_individually(
+            "wildberries_url", BrowserAccessDenied(498),
+        )
+
+    def test_yandex_captcha_is_logged_for_each_link_without_skipping(self):
+        self._assert_denied_marketplace_links_are_tried_individually(
             "yandex_market_url",
             BrowserAccessDenied(200, "обнаружена капча Яндекс Маркета; страница недоступна."),
         )
@@ -518,7 +626,7 @@ class InterfaceTests(unittest.TestCase):
             def fetch(url):
                 return PageSnapshot(url, url, 200, "<html>Товар</html>", 1)
 
-        with patch("web_parser.ui.BrowserPageAccess", FakeAccess):
+        with patch("web_parser.ui.workers.BrowserPageAccess", FakeAccess):
             page.start_button.click()
             self._wait_for_walk(page)
         self.assertEqual(selected[0].name, "Mozilla Firefox")
@@ -540,7 +648,7 @@ class InterfaceTests(unittest.TestCase):
             def __exit__(self, *_args):
                 pass
 
-        with patch("web_parser.ui.BrowserPageAccess", FailingAccess):
+        with patch("web_parser.ui.workers.BrowserPageAccess", FailingAccess):
             page.start_button.click()
             self._wait_for_walk(page)
         self.assertIn("Сборка Firefox", page.run_status.text())
@@ -574,7 +682,7 @@ class InterfaceTests(unittest.TestCase):
                     raise BrowserAccessCancelled("Остановлено")
                 return PageSnapshot(url, url, 200, "<html>Товар</html>", 1)
 
-        with patch("web_parser.ui.BrowserPageAccess", SlowAccess):
+        with patch("web_parser.ui.workers.BrowserPageAccess", SlowAccess):
             page.start_button.click()
             self.assertTrue(entered.wait(2))
             page.stop_button.click()
@@ -614,7 +722,7 @@ class InterfaceTests(unittest.TestCase):
             page.start_button.click()
             self.assertTrue(entered.wait(2))
 
-        with patch("web_parser.ui.BrowserPageAccess", SlowAccess):
+        with patch("web_parser.ui.workers.BrowserPageAccess", SlowAccess):
             self._close_window_while_worker_runs(start_walk, release)
         self.assertEqual(closed, [True])
 

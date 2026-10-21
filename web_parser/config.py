@@ -53,13 +53,23 @@ def _integer(value: object, minimum: int, maximum: int, location: str) -> int:
     return value
 
 
+def _time(value: object, location: str) -> str:
+    checked = _string(value, location)
+    if not _TIME_PATTERN.fullmatch(checked) or int(checked[:2]) > 23 or int(checked[3:]) > 59:
+        raise ConfigError(f"{location} должно быть в формате ЧЧ:ММ.")
+    return checked
+
+
 def _validate_site(value: object, site: str) -> dict:
     location = f"Настройки {site}"
     settings = _require_fields(
         value,
         {"site", "source_url", "token", "browser", "pause_seconds", "ftp", "schedule"},
         location,
-        optional=("source_schedule_enabled",),
+        optional=(
+            "source_schedule_enabled", "source_schedule_time",
+            "source_schedule_interval", "source_schedule_unit",
+        ),
     )
     if settings["site"] != site:
         raise ConfigError(f"{location}: имя сайта не совпадает с вкладкой.")
@@ -92,19 +102,32 @@ def _validate_site(value: object, site: str) -> dict:
     enabled = schedule["enabled"]
     if type(enabled) is not bool:
         raise ConfigError(f"{location}: признак включения расписания должен быть логическим.")
-    start_time = _string(schedule["start_time"], f"{location}, время запуска")
-    if not _TIME_PATTERN.fullmatch(start_time) or int(start_time[:2]) > 23 or int(start_time[3:]) > 59:
-        raise ConfigError(f"{location}: время запуска должно быть в формате ЧЧ:ММ.")
+    start_time = _time(schedule["start_time"], f"{location}: время запуска")
+    source_schedule_time = _time(
+        settings.get("source_schedule_time", start_time), f"{location}: время загрузки JSON",
+    )
     interval = _integer(schedule["interval"], 1, 999, f"{location}, интервал")
     unit = _string(schedule["unit"], f"{location}, единица интервала")
     if unit not in INTERVAL_UNITS:
         raise ConfigError(f"{location}: неизвестная единица интервала.")
+    source_schedule_interval = _integer(
+        settings.get("source_schedule_interval", interval), 1, 999,
+        f"{location}, интервал загрузки JSON",
+    )
+    source_schedule_unit = _string(
+        settings.get("source_schedule_unit", unit), f"{location}, единица интервала загрузки JSON",
+    )
+    if source_schedule_unit not in INTERVAL_UNITS:
+        raise ConfigError(f"{location}: неизвестная единица интервала загрузки JSON.")
 
     return {
         "site": site,
         "source_url": source_url,
         "token": token,
         "source_schedule_enabled": source_schedule_enabled,
+        "source_schedule_time": source_schedule_time,
+        "source_schedule_interval": source_schedule_interval,
+        "source_schedule_unit": source_schedule_unit,
         "browser": browser,
         "pause_seconds": pause_seconds,
         "ftp": checked_ftp,
@@ -220,7 +243,10 @@ def load(path: str | Path) -> dict[str, dict]:
             encrypted_sites[site],
             {"site", "source_url", "token", "browser", "pause_seconds", "ftp", "schedule"},
             f"Настройки {site}",
-            optional=("source_schedule_enabled",),
+            optional=(
+                "source_schedule_enabled", "source_schedule_time",
+                "source_schedule_interval", "source_schedule_unit",
+            ),
         )
         ftp = _require_fields(
             encrypted["ftp"], {"host", "port", "username", "password", "remote_path"},

@@ -17,6 +17,9 @@ def sample_sites() -> dict[str, dict]:
             "source_url": f"https://{site}/products.json",
             "token": f"secret-token-{index}-пароль",
             "source_schedule_enabled": index % 2 == 0,
+            "source_schedule_time": f"1{index}:15",
+            "source_schedule_interval": index + 2,
+            "source_schedule_unit": config.INTERVAL_UNITS[3 - index],
             "browser": config.BROWSERS[index],
             "pause_seconds": index + 1,
             "ftp": {
@@ -84,14 +87,69 @@ class ConfigTests(unittest.TestCase):
         saved = json.loads(self.path.read_text(encoding="utf-8"))
         for settings in saved["sites"].values():
             del settings["source_schedule_enabled"]
+            del settings["source_schedule_time"]
+            del settings["source_schedule_interval"]
+            del settings["source_schedule_unit"]
         self.path.write_text(json.dumps(saved), encoding="utf-8")
         loaded = config.load(self.path)
         self.assertTrue(all(not settings["source_schedule_enabled"] for settings in loaded.values()))
+        self.assertTrue(all(
+            settings["source_schedule_time"] == settings["schedule"]["start_time"]
+            for settings in loaded.values()
+        ))
+        self.assertTrue(all(
+            settings["source_schedule_interval"] == settings["schedule"]["interval"]
+            and settings["source_schedule_unit"] == settings["schedule"]["unit"]
+            for settings in loaded.values()
+        ))
+
+    @unittest.skipUnless(os.name == "nt", "Windows DPAPI required")
+    def test_existing_source_schedule_uses_saved_analysis_period_when_missing(self):
+        original = sample_sites()
+        config.save(self.path, original)
+        saved = json.loads(self.path.read_text(encoding="utf-8"))
+        for settings in saved["sites"].values():
+            del settings["source_schedule_time"]
+            del settings["source_schedule_interval"]
+            del settings["source_schedule_unit"]
+        self.path.write_text(json.dumps(saved), encoding="utf-8")
+
+        loaded = config.load(self.path)
+        self.assertEqual(
+            loaded[config.SITES[0]]["source_schedule_time"],
+            original[config.SITES[0]]["schedule"]["start_time"],
+        )
+        self.assertTrue(loaded[config.SITES[0]]["source_schedule_enabled"])
+        self.assertEqual(
+            loaded[config.SITES[0]]["source_schedule_interval"],
+            original[config.SITES[0]]["schedule"]["interval"],
+        )
+        self.assertEqual(
+            loaded[config.SITES[0]]["source_schedule_unit"],
+            original[config.SITES[0]]["schedule"]["unit"],
+        )
 
     def test_invalid_source_schedule_value_is_rejected(self):
         sites = sample_sites()
         sites[config.SITES[0]]["source_schedule_enabled"] = "yes"
         with self.assertRaisesRegex(config.ConfigError, "расписания источника"):
+            config.save(self.path, sites)
+
+    def test_invalid_source_schedule_time_is_rejected(self):
+        sites = sample_sites()
+        sites[config.SITES[0]]["source_schedule_time"] = "25:10"
+        with self.assertRaisesRegex(config.ConfigError, "время загрузки JSON"):
+            config.save(self.path, sites)
+
+    def test_invalid_source_schedule_period_is_rejected(self):
+        sites = sample_sites()
+        site = config.SITES[0]
+        sites[site]["source_schedule_interval"] = 0
+        with self.assertRaisesRegex(config.ConfigError, "интервал загрузки JSON"):
+            config.save(self.path, sites)
+        sites[site]["source_schedule_interval"] = 2
+        sites[site]["source_schedule_unit"] = "minutes"
+        with self.assertRaisesRegex(config.ConfigError, "единица интервала загрузки JSON"):
             config.save(self.path, sites)
 
     @unittest.skipUnless(os.name == "nt", "Windows DPAPI required")

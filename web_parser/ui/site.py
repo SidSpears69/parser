@@ -1,386 +1,30 @@
-"""Qt6 user interface for Web Parser."""
+"""Controls and state for one source-site tab."""
 
-from datetime import datetime
 from pathlib import Path
-from threading import Event
-from typing import Callable
-from urllib.parse import quote, quote_plus
 
-from PySide6.QtCore import QEvent, QObject, QPointF, Qt, QThread, QTime, QTimer, QUrl, Signal, Slot
-from PySide6.QtGui import QBrush, QColor, QDesktopServices, QPaintEvent, QPainter, QPalette, QPen
+from PySide6.QtCore import Qt, QTime, QUrl, Signal, Slot
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
-    QAbstractButton, QAbstractItemView, QCheckBox, QComboBox, QFileDialog, QFormLayout, QFrame,
-    QGridLayout, QHeaderView, QHBoxLayout, QLabel, QLineEdit, QMainWindow,
-    QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy, QSpinBox,
-    QStyle, QStyledItemDelegate, QStyleOptionViewItem, QTableWidget, QTableWidgetItem,
-    QTabWidget, QTimeEdit, QVBoxLayout, QWidget,
+    QAbstractItemView, QCheckBox, QGridLayout, QHBoxLayout, QHeaderView,
+    QPushButton, QSizePolicy, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from web_parser import config
-from web_parser.browser_access import (
-    BrowserAccessCancelled, BrowserAccessDenied, BrowserAccessError,
-    BrowserPageAccess, browser_profile_dir,
+from web_parser.browser_discovery import BrowserInstallation
+from web_parser.product_links import ProductLinks
+from web_parser.ui.links import LinksPreviewTable
+from web_parser.ui.log import ErrorLog
+from web_parser.ui.widgets import (
+    ReadableComboBox, ReadableSpinBox, ReadableTimeEdit, field, form, label, section,
 )
-from web_parser.browser_discovery import BrowserInstallation, discover_browsers
-from web_parser.product_links import ProductLinks, ProductLinksError, fetch_product_links
+from web_parser.ui.workers import BrowserWalkThread, ProductLinksFetchThread
 
-
-SITES = config.SITES
 BROWSERS = config.BROWSERS
+_INTERVAL_LABELS = ("часов", "дней", "недель", "месяцев")
 
-
-def label(text: str, name: str = "") -> QLabel:
-    widget = QLabel(text)
-    widget.setObjectName(name)
-    return widget
-
-
-def field(placeholder: str, name: str, secret: bool = False) -> QLineEdit:
-    widget = QLineEdit()
-    widget.setPlaceholderText(placeholder)
-    widget.setObjectName(name)
-    widget.setClearButtonEnabled(True)
-    if secret:
-        widget.setEchoMode(QLineEdit.EchoMode.Password)
-    return widget
-
-
-def section(title: str) -> tuple[QFrame, QVBoxLayout]:
-    frame = QFrame()
-    frame.setObjectName("section")
-    layout = QVBoxLayout(frame)
-    layout.setContentsMargins(16, 13, 16, 15)
-    layout.setSpacing(10)
-    layout.addWidget(label(title, "sectionTitle"))
-    return frame, layout
-
-
-def form() -> QFormLayout:
-    layout = QFormLayout()
-    layout.setSpacing(9)
-    layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
-    return layout
-
-
-def _paint_arrow_control(
-    widget: QWidget,
-    event: QPaintEvent,
-    native_paint: Callable[[QPaintEvent], None],
-    *,
-    spin: bool,
-) -> None:
-    """Paint the native control and add a visible chevron on top."""
-    native_paint(event)
-    painter = QPainter(widget)
-    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    color = QColor("#36577f" if widget.isEnabled() else "#9aaabd")
-    painter.setPen(QPen(color, 1.8, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
-    x = widget.width() - (12 if spin else 14)
-    middle = widget.height() / 2
-    if spin:
-        painter.drawPolyline((QPointF(x - 4, middle / 2 + 2), QPointF(x, middle / 2 - 2), QPointF(x + 4, middle / 2 + 2)))
-        painter.drawPolyline((QPointF(x - 4, middle + middle / 2 - 2), QPointF(x, middle + middle / 2 + 2), QPointF(x + 4, middle + middle / 2 - 2)))
-    else:
-        painter.drawPolyline((QPointF(x - 4, middle - 2), QPointF(x, middle + 2), QPointF(x + 4, middle - 2)))
-
-
-class ReadableSpinBox(QSpinBox):
-    """Spin box with visible chevrons independent of the native Qt style."""
-
-    def paintEvent(self, event) -> None:
-        _paint_arrow_control(self, event, super().paintEvent, spin=True)
-
-
-class ReadableTimeEdit(QTimeEdit):
-    """Time editor with visible chevrons independent of the native Qt style."""
-
-    def paintEvent(self, event) -> None:
-        _paint_arrow_control(self, event, super().paintEvent, spin=True)
-
-
-class ReadableComboBox(QComboBox):
-    """Combo box with a visible down chevron independent of the native Qt style."""
-
-    def paintEvent(self, event) -> None:
-        _paint_arrow_control(self, event, super().paintEvent, spin=False)
-
-
-class ClickableCursorFilter(QObject):
-    """Show a hand only while an interactive control is enabled."""
-
-    @staticmethod
-    def update_cursor(widget: QWidget) -> None:
-        shape = Qt.CursorShape.PointingHandCursor if widget.isEnabled() else Qt.CursorShape.ArrowCursor
-        widget.setCursor(shape)
-
-    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
-        if event.type() == QEvent.Type.EnabledChange and isinstance(watched, QWidget):
-            self.update_cursor(watched)
-        return False
-
-
-class ErrorLog(QWidget):
-    """Bounded, per-site error log. Safe to append through a queued Qt signal."""
-
-    error_received = Signal(str, str, str)
-
-    def __init__(self, site: str, parent: QWidget | None = None):
-        super().__init__(parent)
-        self.site = site
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(9)
-        toolbar = QHBoxLayout()
-        toolbar.addWidget(label("Журнал ошибок", "sectionTitle"))
-        self.count_label = label("0 записей", "hint")
-        toolbar.addWidget(self.count_label)
-        toolbar.addStretch()
-        self.save_button = QPushButton("Сохранить TXT…")
-        self.save_button.setObjectName("saveLog")
-        self.clear_button = QPushButton("Очистить")
-        self.clear_button.setObjectName("clearLog")
-        toolbar.addWidget(self.save_button)
-        toolbar.addWidget(self.clear_button)
-        layout.addLayout(toolbar)
-        self.editor = QPlainTextEdit()
-        self.editor.setObjectName("errorLog")
-        self.editor.setReadOnly(True)
-        self.editor.setMaximumBlockCount(2000)
-        self.editor.setPlaceholderText(
-            "Ошибок пока нет.\nЗдесь появятся время события, ID товара, URL и описание ошибки."
-        )
-        self.editor.setMinimumHeight(130)
-        self.editor.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        layout.addWidget(self.editor)
-        self.save_button.clicked.connect(self._choose_export)
-        self.clear_button.clicked.connect(self.editor.clear)
-        self.editor.textChanged.connect(self._refresh)
-        self.error_received.connect(self.append_error)
-        self._refresh()
-
-    @Slot(str, str, str)
-    def append_error(self, product_id: str, url: str, message: str) -> None:
-        # One event per line keeps the bounded log and its counter consistent.
-        clean = lambda value: " ".join(str(value).split())
-        timestamp = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
-        self.editor.appendPlainText(
-            f"[{timestamp}] ID: {clean(product_id) or '—'} | "
-            f"URL: {clean(url) or '—'} | {clean(message)}"
-        )
-
-    def export_to(self, path: str | Path) -> None:
-        Path(path).write_text(self.editor.toPlainText() + "\n", encoding="utf-8")
-
-    def _choose_export(self) -> None:
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Сохранить журнал ошибок", f"{self.site}-errors.txt", "Текстовые файлы (*.txt)"
-        )
-        if path:
-            try:
-                self.export_to(path)
-            except OSError as error:
-                QMessageBox.warning(self, "Не удалось сохранить журнал", str(error))
-
-    def _refresh(self) -> None:
-        has_text = not self.editor.document().isEmpty()
-        count = self.editor.document().blockCount() if has_text else 0
-        self.count_label.setText(f"Записей: {count} / 2000")
-        self.save_button.setEnabled(has_text)
-        self.clear_button.setEnabled(has_text)
-
-
-class BrowserWalkThread(QThread):
-    """Visit the loaded marketplace URLs in one thread-affine Playwright session."""
-
-    page_started = Signal(str, str, str, int, int)
-    page_loaded = Signal(str, str, int, int, int)
-    page_failed = Signal(str, str, str, int, int, str)
-
-    def __init__(
-        self, site: str, installation: BrowserInstallation, links: tuple[ProductLinks, ...],
-        pause_seconds: int, parent=None,
-    ) -> None:
-        super().__init__(parent)
-        self.site = site
-        self.installation = installation
-        self.links = links
-        self.pause_seconds = pause_seconds
-        self.loaded = 0
-        self.failed = 0
-        self.skipped = 0
-        self.cancelled = False
-        self.error: str | None = None
-        self._stop_event = Event()
-
-    @property
-    def stop_requested(self) -> bool:
-        return self._stop_event.is_set()
-
-    def stop(self) -> None:
-        self._stop_event.set()
-
-    def _pause(self, seconds: float) -> None:
-        self._stop_event.wait(seconds)
-
-    def run(self) -> None:
-        total = len(self.links) * 3
-        index = 0
-        blocked_marketplaces: set[str] = set()
-        try:
-            with BrowserPageAccess(
-                self.installation, self.pause_seconds, headless=False,
-                sleep=self._pause, cancel_requested=self._stop_event.is_set,
-                profile_dir=browser_profile_dir(self.site, self.installation.name),
-            ) as access:
-                for product in self.links:
-                    for marketplace, url in (
-                        ("Ozon", product.ozon_url),
-                        ("Wildberries", product.wildberries_url),
-                        ("Яндекс Маркет", product.yandex_market_url),
-                    ):
-                        if self.stop_requested:
-                            self.cancelled = True
-                            return
-                        index += 1
-                        if marketplace in blocked_marketplaces:
-                            self.skipped += 1
-                            continue
-                        self.page_started.emit(product.product_id, marketplace, url, index, total)
-                        try:
-                            snapshot = access.fetch(url)
-                        except BrowserAccessCancelled:
-                            self.cancelled = True
-                            return
-                        except BrowserAccessDenied as error:
-                            blocked_marketplaces.add(marketplace)
-                            self.failed += 1
-                            self.page_failed.emit(
-                                product.product_id, marketplace, url, index, total,
-                                f"{error} Остальные ссылки {marketplace} в этом обходе пропущены.",
-                            )
-                        except BrowserAccessError as error:
-                            self.failed += 1
-                            self.page_failed.emit(
-                                product.product_id, marketplace, url, index, total, str(error),
-                            )
-                        else:
-                            self.loaded += 1
-                            self.page_loaded.emit(
-                                product.product_id, marketplace, index, total, snapshot.status,
-                            )
-        except BrowserAccessError as error:
-            if self.stop_requested:
-                self.cancelled = True
-            else:
-                self.error = str(error) or type(error).__name__
-
-
-class ProductLinksFetchThread(QThread):
-    """Fetch the site's source JSON without blocking the Qt event loop."""
-
-    def __init__(self, source_url: str, token: str, parent=None):
-        super().__init__(parent)
-        self.source_url = source_url
-        self.token = token
-        self.links: list[ProductLinks] | None = None
-        self.error: str | None = None
-
-    def run(self) -> None:
-        try:
-            self.links = fetch_product_links(self.source_url, self.token)
-        except ProductLinksError as error:
-            message = str(error) or type(error).__name__
-            # Avoid exposing the credential even if a lower layer includes it
-            # in an error message or in an URL-encoded query parameter.
-            for secret in {self.token, quote(self.token, safe=""), quote_plus(self.token)}:
-                if secret:
-                    message = message.replace(secret, "[токен скрыт]")
-            self.error = message
-
-
-class LinksPreviewDelegate(QStyledItemDelegate):
-    """Preserve link hover colors when the row is selected."""
-
-    def __init__(self, table: "LinksPreviewTable"):
-        super().__init__(table)
-        self.table = table
-
-    def paint(self, painter, option, index) -> None:
-        if (self.table.hovered_link == (index.row(), index.column())
-                and option.state & QStyle.StateFlag.State_Selected):
-            option = QStyleOptionViewItem(option)
-            option.palette.setColor(QPalette.ColorRole.Highlight, QColor("#c8dcff"))
-            option.palette.setColor(QPalette.ColorRole.HighlightedText, QColor("#1b50b6"))
-        super().paint(painter, option, index)
-
-
-class LinksPreviewTable(QTableWidget):
-    """Keep IDs compact and give clickable links a distinct hover state."""
-
-    _LINK_COLOR = QColor("#245fd2")
-    _LINK_HOVER_COLOR = QColor("#1b50b6")
-    _LINK_HOVER_BACKGROUND = QBrush(QColor("#e8f0ff"))
-
-    def __init__(self):
-        super().__init__(0, 4)
-        self._hovered_link: tuple[int, int] | None = None
-        self.setItemDelegate(LinksPreviewDelegate(self))
-        self.setMouseTracking(True)
-        header = self.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
-        for column in range(1, 4):
-            header.setSectionResizeMode(column, QHeaderView.ResizeMode.Stretch)
-        self.setColumnWidth(0, 64)
-
-    @property
-    def hovered_link(self) -> tuple[int, int] | None:
-        return self._hovered_link
-
-    def resizeEvent(self, event) -> None:
-        super().resizeEvent(event)
-        width = max(40, self.viewport().width() // 16)
-        if self.columnWidth(0) != width:
-            self.setColumnWidth(0, width)
-
-    def mouseMoveEvent(self, event) -> None:
-        index = self.indexAt(event.position().toPoint())
-        item = self.itemFromIndex(index) if index.isValid() else None
-        link = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
-        hovered = (index.row(), index.column()) if isinstance(link, str) else None
-        self._set_hovered_link(hovered)
-        shape = Qt.CursorShape.PointingHandCursor if hovered is not None else Qt.CursorShape.ArrowCursor
-        self.viewport().setCursor(shape)
-        super().mouseMoveEvent(event)
-
-    def viewportEvent(self, event) -> bool:
-        if event.type() == QEvent.Type.Leave:
-            self.reset_link_hover()
-        return super().viewportEvent(event)
-
-    def reset_link_hover(self) -> None:
-        self._set_hovered_link(None)
-        self.viewport().unsetCursor()
-
-    def _set_hovered_link(self, hovered: tuple[int, int] | None) -> None:
-        if hovered == self._hovered_link:
-            return
-        if self._hovered_link is not None:
-            item = self.item(*self._hovered_link)
-            if item is not None:
-                item.setData(Qt.ItemDataRole.BackgroundRole, None)
-                item.setForeground(self._LINK_COLOR)
-                font = item.font()
-                font.setUnderline(False)
-                item.setFont(font)
-        self._hovered_link = hovered
-        if hovered is not None:
-            item = self.item(*hovered)
-            if item is not None:
-                item.setBackground(self._LINK_HOVER_BACKGROUND)
-                item.setForeground(self._LINK_HOVER_COLOR)
-                font = item.font()
-                font.setUnderline(True)
-                item.setFont(font)
+def _soft_wrap(text: str, chunk_size: int = 32) -> str:
+    """Allow long URL and path fragments to wrap without visible separators."""
+    return "\u200b".join(text[index:index + chunk_size] for index in range(0, len(text), chunk_size))
 
 
 class SitePage(QWidget):
@@ -430,6 +74,29 @@ class SitePage(QWidget):
         self.source_schedule_enabled = QCheckBox("По расписанию")
         self.source_schedule_enabled.setObjectName("sourceScheduleEnabled")
         source_layout.addWidget(self.source_schedule_enabled)
+        source_schedule_form = form()
+        self.source_schedule_time = ReadableTimeEdit(QTime(22, 0))
+        self.source_schedule_time.setObjectName("sourceScheduleTime")
+        self.source_schedule_time.setDisplayFormat("HH:mm")
+        self.source_schedule_interval = ReadableSpinBox()
+        self.source_schedule_interval.setObjectName("sourceScheduleInterval")
+        self.source_schedule_interval.setRange(1, 999)
+        self.source_schedule_interval.setValue(1)
+        self.source_schedule_unit = ReadableComboBox()
+        self.source_schedule_unit.setObjectName("sourceScheduleUnit")
+        for title, value in zip(_INTERVAL_LABELS, config.INTERVAL_UNITS):
+            self.source_schedule_unit.addItem(title, value)
+        self.source_schedule_unit.setCurrentIndex(1)
+        source_interval_row = QHBoxLayout()
+        source_interval_row.addWidget(self.source_schedule_interval)
+        source_interval_row.addWidget(self.source_schedule_unit)
+        self.source_schedule_interval.setAccessibleName("Интервал загрузки JSON")
+        self.source_schedule_unit.setAccessibleName("Единица интервала загрузки JSON")
+        source_schedule_form.addRow("Время загрузки JSON", self.source_schedule_time)
+        source_schedule_form.addRow("Повторять каждые", source_interval_row)
+        source_layout.addLayout(source_schedule_form)
+        self.source_schedule_enabled.toggled.connect(self._toggle_source_schedule)
+        self._toggle_source_schedule(False)
         source_hint = label("JSON со списком ID товаров и ссылками на маркетплейсы.", "hint")
         source_hint.setWordWrap(True)
         source_layout.addWidget(source_hint)
@@ -497,10 +164,14 @@ class SitePage(QWidget):
         browser_form.addRow("Пауза между URL", self.pause)
         browser_layout.addLayout(browser_form)
         self.browser_path_label = label("Установленный браузер не найден.", "hint")
+        self.browser_path_label.setTextFormat(Qt.TextFormat.PlainText)
         self.browser_path_label.setWordWrap(True)
+        self.browser_path_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         browser_layout.addWidget(self.browser_path_label)
         self.run_status = label("Загрузите ссылки из JSON, затем нажмите «Запустить».", "hint")
+        self.run_status.setTextFormat(Qt.TextFormat.PlainText)
         self.run_status.setWordWrap(True)
+        self.run_status.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         browser_layout.addWidget(self.run_status)
         hint = label("Откроются все три ссылки каждого товара по очереди. Данные со страниц пока не извлекаются.", "hint")
         hint.setWordWrap(True)
@@ -522,7 +193,7 @@ class SitePage(QWidget):
         self.interval.setValue(1)
         self.interval_unit = ReadableComboBox()
         self.interval_unit.setObjectName("intervalUnit")
-        for title, value in (("часов", "hours"), ("дней", "days"), ("недель", "weeks"), ("месяцев", "months")):
+        for title, value in zip(_INTERVAL_LABELS, config.INTERVAL_UNITS):
             self.interval_unit.addItem(title, value)
         self.interval_unit.setCurrentIndex(1)
         interval_row = QHBoxLayout()
@@ -677,7 +348,7 @@ class SitePage(QWidget):
                     item.setToolTip(value)
                 if column > 0 and value:
                     item.setData(Qt.ItemDataRole.UserRole, value)
-                    item.setForeground(LinksPreviewTable._LINK_COLOR)
+                    item.setForeground(LinksPreviewTable.LINK_COLOR)
                 self.links_preview.setItem(row, column, item)
         self.links_status.setText(f"Загружено товаров: {total}")
         if total:
@@ -749,7 +420,8 @@ class SitePage(QWidget):
         path_text = (
             "Firefox: используется сборка Playwright; наличие проверяется при запуске."
             if name == "Mozilla Firefox" else
-            f"Путь: {installation.path}" if installation else "Установленный браузер не найден."
+            f"Путь: {_soft_wrap(str(installation.path))}"
+            if installation else "Установленный браузер не найден."
         )
         self.browser_path_label.setText(path_text)
         self.browser_path_label.setToolTip(str(installation.path) if installation and name != "Mozilla Firefox" else "")
@@ -799,7 +471,9 @@ class SitePage(QWidget):
         if self._shutting_down:
             return
         self.state_label.setText(f"Обход {index}/{total}")
-        self.run_status.setText(f"Открывается {marketplace}, товар {product_id}: {url}")
+        self.run_status.setText(
+            f"Открывается {marketplace}, товар {product_id}: {_soft_wrap(url)}"
+        )
         row = (index - 1) // 3
         if row < self.links_preview.rowCount():
             self.links_preview.setCurrentCell(row, (index - 1) % 3 + 1)
@@ -840,8 +514,7 @@ class SitePage(QWidget):
                 self.state_label.setText("Остановлен" if thread.cancelled else "Завершён")
                 ending = "Остановлено" if thread.cancelled else "Обход завершён"
                 self.run_status.setText(
-                    f"{ending}. Загружено: {thread.loaded}; ошибок: {thread.failed}; "
-                    f"пропущено: {thread.skipped}."
+                    f"{ending}. Загружено: {thread.loaded}; ошибок: {thread.failed}."
                 )
             self._update_links_controls()
         thread.deleteLater()
@@ -867,6 +540,12 @@ class SitePage(QWidget):
         for widget in (self.start_time, self.interval, self.interval_unit):
             widget.setEnabled(enabled)
 
+    def _toggle_source_schedule(self, enabled: bool) -> None:
+        for widget in (
+            self.source_schedule_time, self.source_schedule_interval, self.source_schedule_unit,
+        ):
+            widget.setEnabled(enabled)
+
     def settings(self) -> dict:
         """Return the settings currently shown on this site's tab."""
         return {
@@ -874,6 +553,9 @@ class SitePage(QWidget):
             "source_url": self.source_url.text().strip(),
             "token": self.token.text(),
             "source_schedule_enabled": self.source_schedule_enabled.isChecked(),
+            "source_schedule_time": self.source_schedule_time.time().toString("HH:mm"),
+            "source_schedule_interval": self.source_schedule_interval.value(),
+            "source_schedule_unit": self.source_schedule_unit.currentData(),
             "browser": self._selected_browser_name(),
             "pause_seconds": self.pause.value(),
             "ftp": {
@@ -893,6 +575,16 @@ class SitePage(QWidget):
         self.source_url.setText(settings["source_url"])
         self.token.setText(settings["token"])
         self.source_schedule_enabled.setChecked(settings.get("source_schedule_enabled", False))
+        schedule = settings["schedule"]
+        self.source_schedule_time.setTime(QTime.fromString(
+            settings.get("source_schedule_time", schedule["start_time"]), "HH:mm",
+        ))
+        self.source_schedule_interval.setValue(
+            settings.get("source_schedule_interval", schedule["interval"])
+        )
+        self.source_schedule_unit.setCurrentIndex(self.source_schedule_unit.findData(
+            settings.get("source_schedule_unit", schedule["unit"])
+        ))
         self.browser.setCurrentIndex(self.browser.findData(settings["browser"]))
         self.pause.setValue(settings["pause_seconds"])
         ftp = settings["ftp"]
@@ -901,158 +593,7 @@ class SitePage(QWidget):
         self.ftp_user.setText(ftp["username"])
         self.ftp_password.setText(ftp["password"])
         self.remote_path.setText(ftp["remote_path"])
-        schedule = settings["schedule"]
         self.schedule_enabled.setChecked(schedule["enabled"])
         self.start_time.setTime(QTime.fromString(schedule["start_time"], "HH:mm"))
         self.interval.setValue(schedule["interval"])
         self.interval_unit.setCurrentIndex(self.interval_unit.findData(schedule["unit"]))
-
-
-class MainWindow(QMainWindow):
-    def __init__(self):
-        super().__init__()
-        self.setWindowTitle("Web Parser — управление сбором данных")
-        self.resize(1140, 900)
-        self.setMinimumSize(850, 620)
-        root = QWidget()
-        root.setObjectName("root")
-        self.setCentralWidget(root)
-        layout = QVBoxLayout(root)
-        layout.setContentsMargins(24, 20, 24, 12)
-        layout.setSpacing(16)
-
-        header = QHBoxLayout()
-        title = QVBoxLayout()
-        title.setSpacing(3)
-        title.addWidget(label("Web Parser", "appTitle"))
-        title.addWidget(label("Сбор данных с маркетплейсов", "subtitle"))
-        header.addLayout(title)
-        header.addStretch()
-        header.addWidget(label("4 сайта", "badge"))
-        layout.addLayout(header)
-
-        config_layout = QHBoxLayout()
-        config_layout.addWidget(label("Конфигурация всех сайтов", "sectionTitle"))
-        config_layout.addStretch()
-        self.load_config_button = QPushButton("Загрузить…")
-        self.load_config_button.setObjectName("loadConfig")
-        self.save_config_button = QPushButton("Сохранить…")
-        self.save_config_button.setObjectName("saveConfig")
-        self.load_config_button.setToolTip("Загрузить настройки всех вкладок из файла")
-        self.save_config_button.setToolTip("Сохранить настройки всех вкладок в файл")
-        config_layout.addWidget(self.load_config_button)
-        config_layout.addWidget(self.save_config_button)
-        layout.addLayout(config_layout)
-
-        self.tabs = QTabWidget()
-        self.tabs.setObjectName("siteTabs")
-        self.tabs.setDocumentMode(True)
-        self._browsers_scanned = False
-        self._close_pending = False
-        self.pages: dict[str, SitePage] = {}
-        for site in SITES:
-            page = SitePage(site)
-            self.pages[site] = page
-            scroll = QScrollArea()
-            scroll.setWidgetResizable(True)
-            scroll.setFrameShape(QFrame.Shape.NoFrame)
-            scroll.setWidget(page)
-            self.tabs.addTab(scroll, site)
-            page.refresh_browsers_requested.connect(self._refresh_browsers)
-            page.walk_finished.connect(self._resume_close)
-            page.walk_state_changed.connect(self._update_config_controls)
-            page.links_fetch_finished.connect(self._resume_close)
-        layout.addWidget(self.tabs, 1)
-        self.save_config_button.clicked.connect(self._choose_save_config)
-        self.load_config_button.clicked.connect(self._choose_load_config)
-        self._refresh_browsers()
-        self._clickable_cursor_filter = ClickableCursorFilter(self)
-        clickable_widgets = (
-            *self.findChildren(QAbstractButton),
-            *self.findChildren(QComboBox),
-            self.tabs.tabBar(),
-        )
-        for widget in clickable_widgets:
-            widget.installEventFilter(self._clickable_cursor_filter)
-            self._clickable_cursor_filter.update_cursor(widget)
-
-    @Slot()
-    def _refresh_browsers(self) -> None:
-        available = discover_browsers()
-        for page in self.pages.values():
-            page.set_available_browsers(available)
-            if not self._browsers_scanned and page.settings()["browser"] not in available:
-                first_installed = next(iter(available), "Mozilla Firefox")
-                page.browser.setCurrentIndex(page.browser.findData(first_installed))
-        self._browsers_scanned = True
-        self.statusBar().showMessage(f"Найдено браузеров: {len(available)}")
-
-    def closeEvent(self, event) -> None:
-        busy = [
-            page for page in self.pages.values()
-            if page.walk_pending or page.links_fetch_pending
-        ]
-        if busy:
-            event.ignore()
-            if not self._close_pending:
-                self._close_pending = True
-                self.statusBar().showMessage("Завершаются фоновые операции перед закрытием приложения…")
-                self.setEnabled(False)
-                for page in self.pages.values():
-                    page.prepare_walk_shutdown()
-            return
-        for page in self.pages.values():
-            page.prepare_walk_shutdown()
-            page.shutdown_links()
-        super().closeEvent(event)
-
-    @Slot()
-    def _resume_close(self) -> None:
-        if self._close_pending and all(
-            not page.walk_pending and not page.links_fetch_pending
-            for page in self.pages.values()
-        ):
-            self._close_pending = False
-            QTimer.singleShot(0, self.close)
-
-    def save_config_to(self, path: str | Path) -> None:
-        config.save(path, {site: page.settings() for site, page in self.pages.items()})
-        self.statusBar().showMessage(f"Настройки сохранены в {Path(path).name}")
-
-    def load_config_from(self, path: str | Path) -> None:
-        if any(page.walk_pending for page in self.pages.values()):
-            raise ValueError("Остановите обход страниц перед загрузкой настроек.")
-        settings_by_site = config.load(path)
-        if set(settings_by_site) != set(SITES):
-            raise ValueError("Файл должен содержать настройки всех четырёх сайтов")
-        for site in SITES:
-            self.pages[site].apply_settings(settings_by_site[site])
-        self.statusBar().showMessage(f"Настройки загружены из {Path(path).name}")
-
-    def _choose_save_config(self) -> None:
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Сохранить настройки", "web-parser-config.json", "Файлы JSON (*.json)"
-        )
-        if not path:
-            return
-        try:
-            self.save_config_to(path)
-        except (OSError, ValueError) as error:
-            QMessageBox.warning(self, "Не удалось сохранить настройки", str(error))
-
-    def _choose_load_config(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Загрузить настройки", "", "Файлы JSON (*.json)"
-        )
-        if not path:
-            return
-        try:
-            self.load_config_from(path)
-        except (OSError, ValueError) as error:
-            QMessageBox.warning(self, "Не удалось загрузить настройки", str(error))
-
-    @Slot()
-    def _update_config_controls(self) -> None:
-        self.load_config_button.setEnabled(
-            not any(page.walk_pending for page in self.pages.values()) and not self._close_pending
-        )
