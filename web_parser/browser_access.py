@@ -25,7 +25,6 @@ _WILDBERRIES_CHALLENGE_TIMEOUT_MS = 20_000
 _YANDEX_SEARCH_TIMEOUT_MS = 10_000
 _YANDEX_SETTLE_MS = 750
 _MAX_ATTEMPTS = 3
-_CHROMIUM_ARGS = ["--disable-blink-features=AutomationControlled"]
 _BROWSER_LAUNCH_TIMEOUT_MS = 20_000
 _YANDEX_CAPTCHA_CHECK = """() => {
     const title = document.title || '';
@@ -153,8 +152,8 @@ def _archive_yandex_saved_tabs(profile_dir: Path) -> None:
         ) from error
 
 
-def _firefox_stealth() -> Stealth:
-    """Hide the automation flag without adding Chromium-only browser properties."""
+def _browser_stealth() -> Stealth:
+    """Apply minimal JavaScript stealth fixes without custom browser flags."""
     return Stealth(
         chrome_app=False,
         chrome_csi=False,
@@ -245,7 +244,8 @@ class BrowserPageAccess:
             else:
                 if self.profile_dir is None:
                     self._browser = self._playwright.chromium.launch(
-                        executable_path=str(binary), headless=self.headless, args=_CHROMIUM_ARGS,
+                        executable_path=str(binary), headless=self.headless,
+                        chromium_sandbox=True,
                     )
                 else:
                     self.profile_dir.mkdir(parents=True, exist_ok=True)
@@ -253,15 +253,15 @@ class BrowserPageAccess:
                         _archive_yandex_saved_tabs(self.profile_dir)
                     self._context = self._playwright.chromium.launch_persistent_context(
                         user_data_dir=str(self.profile_dir), executable_path=str(binary),
-                        headless=self.headless, locale="ru-RU", args=_CHROMIUM_ARGS,
+                        headless=self.headless, locale="ru-RU",
+                        chromium_sandbox=True,
                         timeout=_BROWSER_LAUNCH_TIMEOUT_MS,
                     )
             if self._context is None and self._browser is not None:
                 self._context = self._browser.new_context(locale="ru-RU")
             if self._context is None:
                 raise BrowserAccessError("Не удалось создать контекст браузера.")
-            if name == "Mozilla Firefox":
-                _firefox_stealth().apply_stealth_sync(self._context)
+            _browser_stealth().apply_stealth_sync(self._context)
             pages = list(self._context.pages) if self.profile_dir is not None else []
             self._page = pages[0] if pages else self._context.new_page()
             for stale_page in pages[1:]:

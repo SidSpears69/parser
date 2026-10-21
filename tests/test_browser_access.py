@@ -45,15 +45,15 @@ class BrowserAccessTests(unittest.TestCase):
     def access(self, attempts: int = 3) -> BrowserPageAccess:
         return BrowserPageAccess(CHROME, 2, attempts=attempts, sleep=self.sleep)
 
-    def test_selected_chromium_binary_uses_minimal_browser_flag(self):
+    def test_selected_chromium_binary_uses_context_stealth_without_custom_flags(self):
         with self.access() as access:
             result = access.fetch(URL)
         self.playwright.chromium.launch.assert_called_once_with(
             executable_path=str(BINARY), headless=False,
-            args=["--disable-blink-features=AutomationControlled"],
+            chromium_sandbox=True,
         )
         self.browser.new_context.assert_called_once_with(locale="ru-RU")
-        self.stealth.assert_not_called()
+        self.stealth.return_value.apply_stealth_sync.assert_called_once_with(self.context)
         self.context.new_page.assert_called_once_with()
         self.assertEqual(result.status, 200)
         self.assertEqual(result.html, "<html><body>Товар</body></html>")
@@ -219,10 +219,10 @@ class BrowserAccessTests(unittest.TestCase):
         self.playwright.chromium.launch_persistent_context.assert_called_once_with(
             user_data_dir=str(profile), executable_path=str(BINARY),
             headless=False, locale="ru-RU",
-            args=["--disable-blink-features=AutomationControlled"],
+            chromium_sandbox=True,
             timeout=20_000,
         )
-        self.stealth.assert_not_called()
+        self.stealth.return_value.apply_stealth_sync.assert_called_once_with(context)
         context.new_page.assert_not_called()
         self.page.close.assert_called_once_with()
         context.close.assert_called_once_with()
