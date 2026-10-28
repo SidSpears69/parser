@@ -604,7 +604,7 @@ class InterfaceTests(unittest.TestCase):
                 return {"products": [{"id": 519585970}]}
 
         class FakeWildberriesClient:
-            def __init__(self, *, proxy):
+            def __init__(self, *, proxy, **_kwargs):
                 self.proxy = proxy
 
             def __enter__(self):
@@ -614,7 +614,7 @@ class InterfaceTests(unittest.TestCase):
                 pass
 
             @staticmethod
-            def fetch():
+            def fetch(_url):
                 return (sample_wildberries_product(),)
 
             @staticmethod

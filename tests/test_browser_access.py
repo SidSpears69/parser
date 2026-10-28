@@ -268,6 +268,7 @@ class BrowserAccessTests(unittest.TestCase):
 
         def navigate(*_args, **_kwargs):
             listener[0](api_response)
+            api_response.body.assert_not_called()
             return self.response
 
         self.page.goto.side_effect = navigate
@@ -309,9 +310,8 @@ class BrowserAccessTests(unittest.TestCase):
 
         def receive_json(*_args, **_kwargs):
             listeners[0](api_response)
-            return api_response
 
-        self.page.wait_for_event.side_effect = receive_json
+        self.page.wait_for_timeout.side_effect = receive_json
         with patch("web_parser.browser_access.time.monotonic", side_effect=[0, 1]):
             with self.access(attempts=1) as access:
                 document = access.fetch_wildberries_json(WILDBERRIES_URL)
@@ -320,6 +320,7 @@ class BrowserAccessTests(unittest.TestCase):
             WILDBERRIES_URL, wait_until="domcontentloaded", timeout=30_000,
         )
         self.page.wait_for_function.assert_not_called()
+        self.page.wait_for_event.assert_not_called()
 
     def test_wildberries_browser_fallback_ignores_later_filters_json(self):
         api_url = "https://www.wildberries.ru/__internal/u-search/exactmatch/ru/common/v18/search?query=rope"
@@ -355,7 +356,6 @@ class BrowserAccessTests(unittest.TestCase):
             return self.response
 
         self.page.goto.side_effect = navigate
-        self.page.wait_for_event.side_effect = PlaywrightTimeoutError("no matching JSON")
         with patch("web_parser.browser_access.time.monotonic", side_effect=[0, 46]):
             with self.access(attempts=1) as access:
                 with self.assertRaisesRegex(BrowserAccessError, "не появился JSON"):
@@ -364,7 +364,6 @@ class BrowserAccessTests(unittest.TestCase):
     def test_wildberries_browser_fallback_keeps_498_without_json(self):
         self.page.goto.return_value = Mock(ok=False, status=498)
         self.page.wait_for_function.side_effect = PlaywrightTimeoutError("challenge persists")
-        self.page.wait_for_event.side_effect = PlaywrightTimeoutError("no JSON")
         with patch("web_parser.browser_access.time.monotonic", side_effect=[0, 46]):
             with self.access(attempts=1) as access:
                 with self.assertRaises(BrowserAccessDenied) as caught:
@@ -373,7 +372,6 @@ class BrowserAccessTests(unittest.TestCase):
         self.page.remove_listener.assert_called_once()
 
     def test_wildberries_browser_fallback_rejects_missing_json(self):
-        self.page.wait_for_event.side_effect = PlaywrightTimeoutError("no JSON")
         with patch("web_parser.browser_access.time.monotonic", side_effect=[0, 46]):
             with self.access(attempts=1) as access:
                 with self.assertRaisesRegex(BrowserAccessError, "не появился JSON"):
@@ -385,7 +383,7 @@ class BrowserAccessTests(unittest.TestCase):
         with self.access(attempts=1) as access:
             with self.assertRaisesRegex(BrowserAccessError, "HTTP 404"):
                 access.fetch_wildberries_json(WILDBERRIES_URL)
-        self.page.wait_for_event.assert_not_called()
+        self.page.wait_for_timeout.assert_not_called()
 
     def test_yandex_captcha_with_http_200_retries_before_denial(self):
         self.page.url = YANDEX_URL

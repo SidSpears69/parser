@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
 import json
 import os
@@ -12,7 +13,8 @@ from urllib.parse import parse_qs, quote, quote_plus, urlsplit
 from uuid import uuid4
 
 from playwright.sync_api import Browser, BrowserContext, Error as PlaywrightError
-from playwright.sync_api import Page, Playwright, TimeoutError as PlaywrightTimeoutError, sync_playwright
+from playwright.sync_api import Page, Playwright, Response
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError, sync_playwright
 from playwright_stealth import Stealth
 
 from web_parser.browser_discovery import BrowserInstallation
@@ -512,9 +514,10 @@ class BrowserPageAccess:
         if page is None:
             raise BrowserAccessError("Сначала откройте сеанс Playwright.")
         documents: list[object] = []
+        candidate_responses: deque[Response] = deque()
         search_query = parse_qs(urlsplit(url).query).get("search", [""])[0]
 
-        def is_search_json(response) -> bool:
+        def is_search_json(response: Response) -> bool:
             parts = urlsplit(response.url)
             return (
                 response.status == 200
@@ -524,17 +527,23 @@ class BrowserPageAccess:
                 and parse_qs(parts.query).get("query", [""])[0] == search_query
             )
 
-        def capture(response) -> None:
+        def capture(response: Response) -> None:
             if is_search_json(response):
+                candidate_responses.append(response)
+
+        def read_candidates() -> None:
+            while candidate_responses:
+                response = candidate_responses.popleft()
                 try:
                     document = json.loads(response.body())
                 except (PlaywrightError, UnicodeError, ValueError):
-                    return
+                    continue
                 if not isinstance(document, dict):
-                    return
+                    continue
                 products = document.get("products")
-                if products is None and isinstance(document.get("data"), dict):
-                    products = document["data"].get("products")
+                data = document.get("data")
+                if products is None and isinstance(data, dict):
+                    products = data.get("products")
                 if isinstance(products, list):
                     documents.append(document)
 
@@ -553,10 +562,12 @@ class BrowserPageAccess:
                         url, wait_until="domcontentloaded", timeout=_NAVIGATION_TIMEOUT_MS,
                     )
                 except PlaywrightError as error:
+                    read_candidates()
                     if documents:
                         return documents[-1]
                     last_problem = f"ошибка браузера: {self._safe_error(error)}"
                     continue
+                read_candidates()
                 if documents:
                     return documents[-1]
                 if navigation_response is None:
@@ -576,14 +587,11 @@ class BrowserPageAccess:
                 while not documents and time.monotonic() < deadline:
                     self._check_cancelled()
                     try:
-                        page.wait_for_event(
-                            "response", predicate=is_search_json, timeout=1_000,
-                        )
-                    except PlaywrightTimeoutError:
-                        pass
+                        page.wait_for_timeout(1_000)
                     except PlaywrightError as error:
                         last_problem = f"ошибка браузера: {self._safe_error(error)}"
                         break
+                    read_candidates()
                 if documents:
                     return documents[-1]
             if last_status in (403, 498):
