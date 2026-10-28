@@ -20,6 +20,8 @@ from web_parser.ui.widgets import (
     ReadableComboBox, ReadableSpinBox, ReadableTimeEdit, field, form, label, section,
 )
 from web_parser.ui.workers import BrowserWalkThread, ProductLinksFetchThread
+from web_parser.ui.wildberries import WildberriesResultsTable
+from web_parser.wildberries import WildberriesProduct
 
 BROWSERS = config.BROWSERS
 _INTERVAL_LABELS = ("часов", "дней", "недель", "месяцев")
@@ -46,6 +48,7 @@ class SitePage(QWidget):
         self._walk_thread: BrowserWalkThread | None = None
         self._links_thread: ProductLinksFetchThread | None = None
         self._product_links: tuple[ProductLinks, ...] = ()
+        self._wildberries_results: dict[str, tuple[WildberriesProduct, ...]] = {}
         self._shutting_down = False
         self.setObjectName("sitePage")
         layout = QVBoxLayout(self)
@@ -53,7 +56,7 @@ class SitePage(QWidget):
         layout.setSpacing(14)
 
         toolbar = QHBoxLayout()
-        toolbar.addWidget(label("Обход страниц", "sectionTitle"))
+        toolbar.addWidget(label("Сбор данных", "sectionTitle"))
         self.state_label = label("Не запущен", "state")
         toolbar.addWidget(self.state_label)
         toolbar.addStretch()
@@ -181,9 +184,6 @@ class SitePage(QWidget):
         self.run_status.setWordWrap(True)
         self.run_status.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         browser_layout.addWidget(self.run_status)
-        hint = label("Откроются все три ссылки каждого товара по очереди. Данные со страниц пока не извлекаются.", "hint")
-        hint.setWordWrap(True)
-        browser_layout.addWidget(hint)
         browser_layout.addStretch()
         grid.addWidget(browser, 1, 0)
 
@@ -240,6 +240,25 @@ class SitePage(QWidget):
         links_layout.addWidget(self.links_preview_hint)
         layout.addWidget(links_panel)
 
+        results_panel, results_layout = section("Результаты Wildberries")
+        self.wildberries_table = WildberriesResultsTable()
+        self.wildberries_table.setObjectName("wildberriesResults")
+        self.wildberries_table.verticalHeader().setVisible(False)
+        self.wildberries_table.verticalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.ResizeToContents
+        )
+        self.wildberries_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.wildberries_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.wildberries_table.setAlternatingRowColors(True)
+        self.wildberries_table.setWordWrap(True)
+        self.wildberries_table.setMinimumHeight(190)
+        self.wildberries_table.cellClicked.connect(self._open_wildberries_photo)
+        results_layout.addWidget(self.wildberries_table)
+        self.wildberries_hint = label("После запуска здесь появятся первые шесть товаров каждой выдачи.", "hint")
+        self.wildberries_hint.setWordWrap(True)
+        results_layout.addWidget(self.wildberries_hint)
+        layout.addWidget(results_panel)
+
         self.log = ErrorLog(site)
         layout.addWidget(self.log, 1)
         self.start_button.clicked.connect(self._start_walk)
@@ -256,6 +275,16 @@ class SitePage(QWidget):
         return self._product_links
 
     @property
+    def wildberries_results(self) -> dict[str, tuple[WildberriesProduct, ...]]:
+        return self._wildberries_results.copy()
+
+    def _clear_wildberries_results(self) -> None:
+        self._wildberries_results = {}
+        self.wildberries_table.reset_link_hover()
+        self.wildberries_table.setRowCount(0)
+        self.wildberries_hint.setText("После запуска здесь появятся первые шесть товаров каждой выдачи.")
+
+    @property
     def links_fetch_in_progress(self) -> bool:
         return self._links_thread is not None and self._links_thread.isRunning()
 
@@ -266,6 +295,7 @@ class SitePage(QWidget):
     def _clear_product_links(self) -> None:
         if self._links_thread is None:
             self._product_links = ()
+            self._clear_wildberries_results()
             self.links_preview.reset_link_hover()
             self.links_preview.setRowCount(0)
             self.links_status.setText("Ссылки ещё не загружены.")
@@ -294,6 +324,7 @@ class SitePage(QWidget):
         if not source_url or not token:
             return
         self._product_links = ()
+        self._clear_wildberries_results()
         self.links_preview.reset_link_hover()
         self.links_preview.setRowCount(0)
         self._update_browser_controls()
@@ -382,6 +413,14 @@ class SitePage(QWidget):
             if isinstance(url, str):
                 QDesktopServices.openUrl(QUrl(url))
 
+    def _open_wildberries_photo(self, row: int, column: int) -> None:
+        if column != 6:
+            return
+        item = self.wildberries_table.item(row, column)
+        url = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+        if isinstance(url, str):
+            QDesktopServices.openUrl(QUrl(url))
+
     def shutdown_links(self) -> None:
         """Release a completed fetch worker when the window closes."""
         self._shutting_down = True
@@ -467,11 +506,15 @@ class SitePage(QWidget):
             proxy=proxy,
         )
         self._walk_thread = thread
+        self._clear_wildberries_results()
         self.state_label.setText("Запуск…")
-        self.run_status.setText(f"Открывается {installation.name}; страниц в очереди: {len(self._product_links) * 3}.")
+        self.run_status.setText(
+            f"Запускается {installation.name}; заданий в очереди: {len(self._product_links) * 3}."
+        )
         thread.page_started.connect(self._walk_page_started)
         thread.page_loaded.connect(self._walk_page_loaded)
         thread.page_failed.connect(self._walk_page_failed)
+        thread.wildberries_parsed.connect(self._walk_wildberries_parsed)
         thread.finished.connect(self._walk_finished)
         thread.start()
         self._update_links_controls()
@@ -491,9 +534,11 @@ class SitePage(QWidget):
         if self._shutting_down:
             return
         self.state_label.setText(f"Обход {index}/{total}")
-        self.run_status.setText(
-            f"Открывается {marketplace}, товар {product_id}: {_soft_wrap(url)}"
+        action = (
+            "Запрашивается JSON Wildberries"
+            if marketplace == "Wildberries" else f"Открывается {marketplace}"
         )
+        self.run_status.setText(f"{action}, товар {product_id}: {_soft_wrap(url)}")
         row = (index - 1) // 3
         if row < self.links_preview.rowCount():
             self.links_preview.setCurrentCell(row, (index - 1) % 3 + 1)
@@ -504,12 +549,46 @@ class SitePage(QWidget):
     ) -> None:
         if not self._shutting_down:
             detail = (
+                f"JSON: {len(self._wildberries_results.get(product_id, ()))} товаров"
+                if marketplace == "Wildberries" else
                 "страница открылась после проверки браузера (первичный HTTP 403)"
                 if marketplace == "Ozon" and status == 403 else
-                "страница открылась после проверки браузера (первичный HTTP 498)"
-                if marketplace == "Wildberries" and status == 498 else f"HTTP {status}"
+                f"HTTP {status}"
             )
             self.run_status.setText(f"Загружено {index}/{total}: {marketplace}, товар {product_id}, {detail}.")
+
+    @Slot(str, object)
+    def _walk_wildberries_parsed(
+        self, product_id: str, products: tuple[WildberriesProduct, ...],
+    ) -> None:
+        if self._shutting_down:
+            return
+        self._wildberries_results[product_id] = products
+        table = self.wildberries_table
+        for product in products:
+            row = table.rowCount()
+            if row >= 120:
+                break
+            table.insertRow(row)
+            values = (
+                product_id, product.name, f"{product.price:.2f}",
+                f"{product.discounted_price:.2f}",
+                str(product.rating) if product.rating is not None else "—",
+                str(product.reviews), "Открыть фото",
+            )
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                if column == 1:
+                    item.setToolTip(f"Артикул WB: {product.wb_id}")
+                if column == 6:
+                    item.setForeground(table.LINK_COLOR)
+                    item.setData(Qt.ItemDataRole.UserRole, product.image_url)
+                    item.setToolTip(product.image_url)
+                table.setItem(row, column, item)
+        self.wildberries_hint.setText(
+            f"Собрано товаров: {sum(len(items) for items in self._wildberries_results.values())}; "
+            f"показано: {table.rowCount()}."
+        )
 
     @Slot(str, str, str, int, int, str)
     def _walk_page_failed(
@@ -534,7 +613,8 @@ class SitePage(QWidget):
                 self.state_label.setText("Остановлен" if thread.cancelled else "Завершён")
                 ending = "Остановлено" if thread.cancelled else "Обход завершён"
                 self.run_status.setText(
-                    f"{ending}. Загружено: {thread.loaded}; ошибок: {thread.failed}."
+                    f"{ending}. Загружено: {thread.loaded}; ошибок: {thread.failed}; "
+                    f"товаров Wildberries: {sum(len(items) for items in self._wildberries_results.values())}."
                 )
             self._update_links_controls()
         thread.deleteLater()

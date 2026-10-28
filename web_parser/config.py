@@ -68,12 +68,13 @@ def validate_proxy(value: object) -> dict[str, str | bool]:
         if bool(username) != bool(password):
             raise ConfigError("Прокси: укажите и логин, и пароль либо оставьте оба поля пустыми.")
         if parsed is not None and parsed.scheme == "socks5" and username:
-            raise ConfigError("Прокси: авторизация поддерживается только для HTTP(S)-прокси.")
+            if len(username.encode("utf-8")) > 255 or len(password.encode("utf-8")) > 255:
+                raise ConfigError("Прокси: логин и пароль SOCKS5 должны быть не длиннее 255 байт.")
     return {"enabled": enabled, "server": server, "username": username, "password": password}
 
 
 def playwright_proxy(value: dict[str, str | bool]) -> dict[str, str] | None:
-    """Return Playwright options for an enabled validated proxy."""
+    """Return validated proxy settings for the browser session."""
     checked = validate_proxy(value)
     if not checked["enabled"]:
         return None

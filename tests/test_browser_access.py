@@ -1,9 +1,11 @@
 """Offline checks for Playwright page access, delays and bounded retries."""
 
 from pathlib import Path
+import socket
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
+from urllib.parse import urlsplit
 
 from playwright.sync_api import Error as PlaywrightError, TimeoutError as PlaywrightTimeoutError
 
@@ -74,6 +76,65 @@ class BrowserAccessTests(unittest.TestCase):
         self.playwright.chromium.launch.assert_called_once_with(
             executable_path=str(BINARY), headless=False,
             chromium_sandbox=True, proxy=proxy,
+        )
+
+    def test_authenticated_socks5_proxy_uses_and_closes_loopback_relay(self):
+        proxy = {
+            "server": "socks5://ru-proxy.example:63397",
+            "username": "user", "password": "secret",
+        }
+        access = BrowserPageAccess(CHROME, 2, proxy=proxy)
+        with access:
+            passed_proxy = self.playwright.chromium.launch.call_args.kwargs["proxy"]
+            self.assertEqual(access.effective_proxy, passed_proxy)
+            self.assertEqual(
+                self.playwright.chromium.launch.call_args.kwargs["ignore_default_args"],
+                ['--host-resolver-rules="MAP * ~NOTFOUND , EXCLUDE 127.0.0.1"'],
+            )
+            parsed = urlsplit(passed_proxy["server"])
+            self.assertEqual(parsed.scheme, "socks5")
+            self.assertEqual(parsed.hostname, "127.0.0.1")
+            self.assertIsNotNone(parsed.port)
+            self.assertNotIn("username", passed_proxy)
+            self.assertNotIn("password", passed_proxy)
+            with socket.create_connection((parsed.hostname, parsed.port), timeout=1) as connection:
+                connection.sendall(bytes((5, 1, 0)))
+                self.assertEqual(connection.recv(2), bytes((5, 0)))
+        self.assertIsNone(access._proxy_relay)
+        with self.assertRaises(OSError):
+            socket.create_connection((parsed.hostname, parsed.port), timeout=0.2)
+
+    def test_all_chromium_browsers_filter_unsupported_socks5_resolver_flag(self):
+        proxy = {
+            "server": "socks5://ru-proxy.example:63397",
+            "username": "user", "password": "secret",
+        }
+        for name in BROWSERS[:-1]:
+            with self.subTest(browser=name), tempfile.TemporaryDirectory() as folder:
+                installation = BrowserInstallation(name, BINARY)
+                context = self.playwright.chromium.launch_persistent_context.return_value
+                context.pages = [self.page]
+                with BrowserPageAccess(installation, 1, profile_dir=Path(folder), proxy=proxy):
+                    pass
+                launch_options = self.playwright.chromium.launch_persistent_context.call_args.kwargs
+                local_proxy = urlsplit(launch_options["proxy"]["server"])
+                self.assertEqual(local_proxy.scheme, "socks5")
+                self.assertEqual(local_proxy.hostname, "127.0.0.1")
+                self.assertEqual(
+                    launch_options["ignore_default_args"],
+                    ['--host-resolver-rules="MAP * ~NOTFOUND , EXCLUDE 127.0.0.1"'],
+                )
+                self.assertTrue(launch_options["chromium_sandbox"])
+                self.playwright.chromium.launch_persistent_context.reset_mock()
+
+    def test_firefox_socks5_launch_does_not_receive_chromium_options(self):
+        firefox = BrowserInstallation("Mozilla Firefox", BINARY)
+        self.playwright.firefox.executable_path = str(BINARY)
+        proxy = {"server": "socks5://ru-proxy.example:1080"}
+        with BrowserPageAccess(firefox, 1, proxy=proxy):
+            pass
+        self.playwright.firefox.launch.assert_called_once_with(
+            headless=False, proxy=proxy,
         )
 
     def test_proxy_credentials_are_hidden_in_launch_errors(self):
@@ -196,15 +257,122 @@ class BrowserAccessTests(unittest.TestCase):
         self.assertEqual(caught.exception.status, 498)
         self.page.goto.assert_called_once()
 
-    def test_yandex_captcha_with_http_200_is_denied_without_retry(self):
+    def test_wildberries_browser_fallback_captures_json_response(self):
+        api_response = Mock(
+            status=200,
+            url="https://www.wildberries.ru/__internal/u-search/exactmatch/ru/common/v18/search?query=rope",
+        )
+        api_response.body.return_value = b'{"products":[{"id":42}]}'
+        listener = []
+        self.page.on.side_effect = lambda _event, callback: listener.append(callback)
+
+        def navigate(*_args, **_kwargs):
+            listener[0](api_response)
+            return self.response
+
+        self.page.goto.side_effect = navigate
+        with self.access() as access:
+            document = access.fetch_wildberries_json(WILDBERRIES_URL)
+        self.assertEqual(document, {"products": [{"id": 42}]})
+        self.page.remove_listener.assert_called_once_with("response", listener[0])
+
+    def test_wildberries_browser_fallback_uses_json_despite_498_html_check(self):
+        api_response = Mock(
+            status=200,
+            url="https://search.wb.ru/exactmatch/ru/common/v18/search?query=rope",
+        )
+        api_response.body.return_value = b'{"products":[{"id":42}]}'
+        listener = []
+        self.page.on.side_effect = lambda _event, callback: listener.append(callback)
+
+        def navigate(*_args, **_kwargs):
+            listener[0](api_response)
+            return Mock(ok=False, status=498)
+
+        self.page.goto.side_effect = navigate
+        self.page.wait_for_function.side_effect = PlaywrightTimeoutError("HTML check missed results")
+        with self.access() as access:
+            document = access.fetch_wildberries_json(WILDBERRIES_URL)
+        self.assertEqual(document, {"products": [{"id": 42}]})
+        self.page.remove_listener.assert_called_once_with("response", listener[0])
+
+    def test_wildberries_browser_fallback_ignores_later_filters_json(self):
+        api_url = "https://www.wildberries.ru/__internal/u-search/exactmatch/ru/common/v18/search?query=rope"
+        products_response = Mock(status=200, url=api_url)
+        products_response.body.return_value = b'{"products":[{"id":42}]}'
+        filters_response = Mock(status=200, url=api_url + "&autoselectFilters=false")
+        filters_response.body.return_value = b'{"data":{"filters":[],"total":1}}'
+        listener = []
+        self.page.on.side_effect = lambda _event, callback: listener.append(callback)
+
+        def navigate(*_args, **_kwargs):
+            listener[0](products_response)
+            listener[0](filters_response)
+            return Mock(ok=False, status=498)
+
+        self.page.goto.side_effect = navigate
+        self.page.wait_for_function.side_effect = PlaywrightTimeoutError("HTML check missed results")
+        with self.access() as access:
+            document = access.fetch_wildberries_json(WILDBERRIES_URL)
+        self.assertEqual(document, {"products": [{"id": 42}]})
+
+    def test_wildberries_browser_fallback_ignores_other_search_query(self):
+        api_response = Mock(
+            status=200,
+            url="https://search.wb.ru/exactmatch/ru/common/v18/search?query=another",
+        )
+        api_response.body.return_value = b'{"products":[{"id":42}]}'
+        listener = []
+        self.page.on.side_effect = lambda _event, callback: listener.append(callback)
+
+        def navigate(*_args, **_kwargs):
+            listener[0](api_response)
+            return self.response
+
+        self.page.goto.side_effect = navigate
+        self.page.wait_for_event.side_effect = PlaywrightTimeoutError("no matching JSON")
+        with patch("web_parser.browser_access.time.monotonic", side_effect=[0, 0, 11]):
+            with self.access() as access:
+                with self.assertRaisesRegex(BrowserAccessError, "не появился JSON"):
+                    access.fetch_wildberries_json(WILDBERRIES_URL)
+
+    def test_wildberries_browser_fallback_keeps_498_without_json(self):
+        self.page.goto.return_value = Mock(ok=False, status=498)
+        self.page.wait_for_function.side_effect = PlaywrightTimeoutError("challenge persists")
+        self.page.wait_for_event.side_effect = PlaywrightTimeoutError("no JSON")
+        with patch("web_parser.browser_access.time.monotonic", side_effect=[0, 0, 11]):
+            with self.access() as access:
+                with self.assertRaises(BrowserAccessDenied) as caught:
+                    access.fetch_wildberries_json(WILDBERRIES_URL)
+        self.assertEqual(caught.exception.status, 498)
+        self.page.remove_listener.assert_called_once()
+
+    def test_wildberries_browser_fallback_rejects_missing_json(self):
+        self.page.wait_for_event.side_effect = PlaywrightTimeoutError("no JSON")
+        with patch("web_parser.browser_access.time.monotonic", side_effect=[0, 0, 11]):
+            with self.access() as access:
+                with self.assertRaisesRegex(BrowserAccessError, "не появился JSON"):
+                    access.fetch_wildberries_json(WILDBERRIES_URL)
+        self.page.remove_listener.assert_called_once()
+
+    def test_yandex_captcha_with_http_200_retries_before_denial(self):
         self.page.url = YANDEX_URL
         self.page.evaluate.return_value = True
         with self.access() as access:
-            with self.assertRaisesRegex(BrowserAccessDenied, "HTTP 200: обнаружена капча"):
+            with self.assertRaisesRegex(BrowserAccessDenied, "HTTP 200: обнаружена капча.*попыток: 3"):
                 access.fetch(YANDEX_URL)
-        self.page.goto.assert_called_once()
+        self.assertEqual(self.page.goto.call_count, 3)
         self.page.content.assert_not_called()
-        self.sleep.assert_not_called()
+        self.assertEqual(self.sleep.call_count, 2)
+
+    def test_yandex_captcha_can_clear_on_retry(self):
+        self.page.url = YANDEX_URL
+        self.page.evaluate.side_effect = [True, False, False, "results"]
+        with self.access() as access:
+            result = access.fetch(YANDEX_URL)
+        self.assertEqual(result.attempts, 2)
+        self.assertEqual(self.page.goto.call_count, 2)
+        self.sleep.assert_called_once_with(2)
 
     def test_yandex_captcha_redirect_is_denied(self):
         self.page.url = "https://yandex.ru/showcaptcha?retpath=market.yandex.ru"
@@ -212,26 +380,52 @@ class BrowserAccessTests(unittest.TestCase):
             with self.assertRaisesRegex(BrowserAccessDenied, "капча"):
                 access.fetch(YANDEX_URL)
         self.page.evaluate.assert_not_called()
-        self.page.goto.assert_called_once()
+        self.assertEqual(self.page.goto.call_count, 3)
 
     def test_yandex_search_requires_results_before_success(self):
         self.page.url = YANDEX_URL
+        self.page.evaluate.side_effect = [False, False, "results"]
         with self.access() as access:
             result = access.fetch(YANDEX_URL)
         self.assertEqual(result.status, 200)
         self.assertIn("searchOrganic", self.page.wait_for_function.call_args.args[0])
         self.assertEqual(self.page.wait_for_function.call_args.kwargs["timeout"], 10_000)
         self.page.wait_for_timeout.assert_called_once_with(750)
-        self.assertEqual(self.page.evaluate.call_count, 2)
+        self.assertEqual(self.page.evaluate.call_count, 3)
+
+    def test_yandex_site_error_retries_with_explicit_reason(self):
+        self.page.url = YANDEX_URL
+        self.page.evaluate.side_effect = [False, False, "site_error"] * 3
+        with self.access() as access:
+            with self.assertRaisesRegex(
+                BrowserAccessError, "Яндекс Маркет показал страницу «Что-то не сработало»",
+            ):
+                access.fetch(YANDEX_URL)
+        self.assertEqual(self.page.goto.call_count, 3)
+        self.assertEqual(self.page.wait_for_function.call_count, 3)
+        self.assertIn("Что-то не сработало", self.page.wait_for_function.call_args.args[0])
+        self.assertEqual(self.sleep.call_count, 2)
+        self.page.content.assert_not_called()
+
+    def test_yandex_site_error_can_clear_on_retry(self):
+        self.page.url = YANDEX_URL
+        self.page.evaluate.side_effect = [
+            False, False, "site_error", False, False, "results",
+        ]
+        with self.access() as access:
+            result = access.fetch(YANDEX_URL)
+        self.assertEqual(result.attempts, 2)
+        self.assertEqual(self.page.goto.call_count, 2)
+        self.sleep.assert_called_once_with(2)
 
     def test_yandex_captcha_after_navigation_is_denied(self):
         self.page.url = YANDEX_URL
-        self.page.evaluate.side_effect = [False, True]
+        self.page.evaluate.side_effect = [False, True] * 3
         self.page.wait_for_function.side_effect = PlaywrightTimeoutError("challenge appeared")
         with self.access() as access:
             with self.assertRaisesRegex(BrowserAccessDenied, "капча"):
                 access.fetch(YANDEX_URL)
-        self.page.goto.assert_called_once()
+        self.assertEqual(self.page.goto.call_count, 3)
         self.page.content.assert_not_called()
 
     def test_dedicated_persistent_profile_is_used_for_chromium(self):

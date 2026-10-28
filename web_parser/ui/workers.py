@@ -10,13 +10,18 @@ from web_parser.browser_access import (
 )
 from web_parser.browser_discovery import BrowserInstallation
 from web_parser.product_links import ProductLinks, ProductLinksError, fetch_product_links
+from web_parser.wildberries import (
+    WildberriesClient, WildberriesError, WildberriesHTTPError, WildberriesProduct,
+    WildberriesRequestError,
+)
 
 class BrowserWalkThread(QThread):
-    """Visit the loaded marketplace URLs in one thread-affine Playwright session."""
+    """Visit browser pages and read Wildberries directly from storefront JSON."""
 
     page_started = Signal(str, str, str, int, int)
     page_loaded = Signal(str, str, int, int, int)
     page_failed = Signal(str, str, str, int, int, str)
+    wildberries_parsed = Signal(str, object)
 
     def __init__(
         self, site: str, installation: BrowserInstallation, links: tuple[ProductLinks, ...],
@@ -32,6 +37,7 @@ class BrowserWalkThread(QThread):
         self.failed = 0
         self.cancelled = False
         self.error: str | None = None
+        self.wildberries_results: dict[str, tuple[WildberriesProduct, ...]] = {}
         self._stop_event = Event()
 
     @property
@@ -53,7 +59,10 @@ class BrowserWalkThread(QThread):
                 sleep=self._pause, cancel_requested=self._stop_event.is_set,
                 profile_dir=browser_profile_dir(self.site, self.installation.name),
                 proxy=self.proxy,
-            ) as access:
+            ) as access, WildberriesClient(
+                proxy=getattr(access, "effective_proxy", self.proxy),
+                playwright=getattr(access, "playwright", None),
+            ) as wildberries:
                 for product in self.links:
                     for marketplace, url in (
                         ("Ozon", product.ozon_url),
@@ -66,11 +75,31 @@ class BrowserWalkThread(QThread):
                         index += 1
                         self.page_started.emit(product.product_id, marketplace, url, index, total)
                         try:
-                            snapshot = access.fetch(url)
+                            if marketplace == "Wildberries":
+                                self._pause(self.pause_seconds)
+                                if self.stop_requested:
+                                    self.cancelled = True
+                                    return
+                                try:
+                                    parsed = wildberries.fetch(url)
+                                except (WildberriesHTTPError, WildberriesRequestError) as error:
+                                    if error.label != "Поиск Wildberries" or (
+                                        isinstance(error, WildberriesHTTPError)
+                                        and error.status not in (403, 498)
+                                    ):
+                                        raise
+                                    document = access.fetch_wildberries_json(url)
+                                    parsed = wildberries.parse_document(document)
+                                self.wildberries_results[product.product_id] = parsed
+                                self.wildberries_parsed.emit(product.product_id, parsed)
+                                status = 200
+                            else:
+                                snapshot = access.fetch(url)
+                                status = snapshot.status
                         except BrowserAccessCancelled:
                             self.cancelled = True
                             return
-                        except BrowserAccessError as error:
+                        except (BrowserAccessError, WildberriesError) as error:
                             self.failed += 1
                             self.page_failed.emit(
                                 product.product_id, marketplace, url, index, total, str(error),
@@ -78,9 +107,9 @@ class BrowserWalkThread(QThread):
                         else:
                             self.loaded += 1
                             self.page_loaded.emit(
-                                product.product_id, marketplace, index, total, snapshot.status,
+                                product.product_id, marketplace, index, total, status,
                             )
-        except BrowserAccessError as error:
+        except (BrowserAccessError, WildberriesError) as error:
             if self.stop_requested:
                 self.cancelled = True
             else:

@@ -85,14 +85,25 @@ class ConfigTests(unittest.TestCase):
             ("", "", ""),
             ("http://user:password@proxy.example:8080", "", ""),
             ("http://proxy.example:8080/path", "", ""),
-            ("socks5://proxy.example:1080", "user", "password"),
             ("http://proxy.example:8080", "user", ""),
+            ("socks5://proxy.example:1080", "u" * 256, "password"),
         ):
             with self.subTest(server=server, username=username):
                 proxy = {"enabled": True, "server": server, "username": username, "password": password}
                 with self.assertRaises(config.ConfigError):
                     config.save(self.path, sample_sites(), proxy)
                 self.assertEqual(self.path.read_text(encoding="utf-8"), "existing configuration")
+
+    def test_authenticated_socks5_proxy_is_supported(self):
+        proxy = {
+            "enabled": True, "server": "socks5://ru-proxy.example:63397",
+            "username": "proxy-user", "password": "proxy-password",
+        }
+        self.assertEqual(config.validate_proxy(proxy), proxy)
+        self.assertEqual(config.playwright_proxy(proxy), {
+            "server": proxy["server"], "username": proxy["username"],
+            "password": proxy["password"],
+        })
 
     @unittest.skipUnless(os.name == "nt", "Windows DPAPI required")
     def test_corrupt_later_site_rejects_complete_import(self):

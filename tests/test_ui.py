@@ -22,6 +22,15 @@ from web_parser.browser_access import (
 from web_parser.browser_discovery import BrowserInstallation
 from web_parser.product_links import ProductLinks, ProductLinksError
 from web_parser.ui import MainWindow, SITES
+from web_parser.wildberries import WildberriesHTTPError, WildberriesProduct
+from decimal import Decimal
+
+
+def sample_wildberries_product() -> WildberriesProduct:
+    return WildberriesProduct(
+        519585970, "https://basket-28.wbbasket.ru/vol5195/part519585/519585970/images/c516x688/1.webp",
+        Decimal("3229"), Decimal("930"), "Шнур", Decimal("4.9"), 26,
+    )
 
 
 class InterfaceTests(unittest.TestCase):
@@ -31,8 +40,25 @@ class InterfaceTests(unittest.TestCase):
 
     def setUp(self):
         self.window = MainWindow()
+        class FakeWildberriesClient:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                pass
+
+            @staticmethod
+            def fetch(_url):
+                return (sample_wildberries_product(),)
+
+        self._wildberries_patch = patch("web_parser.ui.workers.WildberriesClient", FakeWildberriesClient)
+        self._wildberries_patch.start()
 
     def tearDown(self):
+        self._wildberries_patch.stop()
         self.window.close()
         self.window.deleteLater()
         self.app.processEvents()
@@ -54,6 +80,7 @@ class InterfaceTests(unittest.TestCase):
     def _load_links(self, page, links: list[ProductLinks]) -> None:
         page.source_url.setText("https://example.org/products.json")
         page.token.setText("private-token")
+        page.pause.setValue(1)
         with patch("web_parser.ui.workers.fetch_product_links", return_value=links):
             page.load_links_button.click()
             deadline = time.monotonic() + 3
@@ -96,7 +123,27 @@ class InterfaceTests(unittest.TestCase):
                     raise denial
                 return PageSnapshot(url, url, 200, "<html>Товар</html>", 1)
 
-        with patch("web_parser.ui.workers.BrowserPageAccess", DeniedAccess):
+        class TrackedWildberriesClient:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                pass
+
+            @staticmethod
+            def fetch(url):
+                visited.append(url)
+                if url in denied_urls:
+                    raise denial
+                return (sample_wildberries_product(),)
+
+        with (
+            patch("web_parser.ui.workers.BrowserPageAccess", DeniedAccess),
+            patch("web_parser.ui.workers.WildberriesClient", TrackedWildberriesClient),
+        ):
             page.start_button.click()
             self._wait_for_walk(page)
         self.assertEqual(visited, [
@@ -532,11 +579,29 @@ class InterfaceTests(unittest.TestCase):
             @staticmethod
             def fetch(url):
                 visited.append(url)
-                if url == links[0].wildberries_url:
-                    raise BrowserAccessError("HTTP 503")
                 return PageSnapshot(url, url, 200, "<html>Товар</html>", 1)
 
-        with patch("web_parser.ui.workers.BrowserPageAccess", FakeAccess):
+        class FakeWildberriesClient:
+            def __init__(self, *, proxy):
+                self.proxy = proxy
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                pass
+
+            @staticmethod
+            def fetch(url):
+                visited.append(url)
+                if url == links[0].wildberries_url:
+                    raise BrowserAccessError("HTTP 503")
+                return (sample_wildberries_product(),)
+
+        with (
+            patch("web_parser.ui.workers.BrowserPageAccess", FakeAccess),
+            patch("web_parser.ui.workers.WildberriesClient", FakeWildberriesClient),
+        ):
             page.start_button.click()
             self.assertFalse(page.start_button.isEnabled())
             self.assertFalse(self.window.load_config_button.isEnabled())
@@ -622,7 +687,7 @@ class InterfaceTests(unittest.TestCase):
             release.set()
             self._wait_for_walk(page)
 
-    def test_resolved_marketplace_challenges_count_as_loaded(self):
+    def test_resolved_browser_challenge_and_wildberries_json_count_as_loaded(self):
         page = self.window.pages[SITES[0]]
         links = [ProductLinks(
             "42", "https://ozon.example/42", "https://wb.example/42", "https://ya.example/42",
@@ -641,18 +706,89 @@ class InterfaceTests(unittest.TestCase):
 
             @staticmethod
             def fetch(url):
-                status = (
-                    403 if url == links[0].ozon_url else
-                    498 if url == links[0].wildberries_url else 200
-                )
+                status = 403 if url == links[0].ozon_url else 200
                 return PageSnapshot(url, url, status, "<html>Товар</html>", 1)
 
         with patch("web_parser.ui.workers.BrowserPageAccess", ResolvedAccess):
             page.start_button.click()
             self._wait_for_walk(page)
         self.assertIn("Загружено: 3; ошибок: 0", page.run_status.text())
+        self.assertEqual(page.wildberries_table.rowCount(), 1)
+        self.assertEqual(page.wildberries_table.item(0, 1).text(), "Шнур")
+        self.assertEqual(page.wildberries_table.item(0, 2).text(), "3229.00")
+        self.assertEqual(page.wildberries_table.item(0, 3).text(), "930.00")
+        self.assertEqual(page.wildberries_table.item(0, 4).text(), "4.9")
+        self.assertEqual(page.wildberries_table.item(0, 5).text(), "26")
+        self.assertEqual(page.wildberries_results["42"][0].wb_id, 519585970)
+        with patch("web_parser.ui.site.QDesktopServices.openUrl", return_value=True) as open_url:
+            page.wildberries_table.cellClicked.emit(0, 6)
+        open_url.assert_called_once()
+        self.assertEqual(open_url.call_args.args[0].toString(), sample_wildberries_product().image_url)
         self.assertFalse(hasattr(page, "retry_button"))
         self.assertFalse(hasattr(page, "skip_marketplace_button"))
+
+    def test_wildberries_http_denial_uses_selected_browser_as_fallback(self):
+        page = self.window.pages[SITES[0]]
+        links = [ProductLinks(
+            "42", "https://ozon.example/42",
+            "https://www.wildberries.ru/catalog/0/search.aspx?search=rope",
+            "https://ya.example/42",
+        )]
+        self._load_links(page, links)
+        captured = {"products": [{"id": 519585970}]}
+        visited = []
+
+        class FakeAccess:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                pass
+
+            @staticmethod
+            def fetch(url):
+                visited.append(url)
+                return PageSnapshot(url, url, 200, "<html>Товар</html>", 1)
+
+            @staticmethod
+            def fetch_wildberries_json(url):
+                visited.append(url)
+                return captured
+
+        class DeniedClient:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                pass
+
+            @staticmethod
+            def fetch(_url):
+                raise WildberriesHTTPError("Поиск Wildberries", 403)
+
+            @staticmethod
+            def parse_document(document):
+                if document != captured:
+                    raise AssertionError("Получен чужой JSON")
+                return (sample_wildberries_product(),)
+
+        with (
+            patch("web_parser.ui.workers.BrowserPageAccess", FakeAccess),
+            patch("web_parser.ui.workers.WildberriesClient", DeniedClient),
+        ):
+            page.start_button.click()
+            self._wait_for_walk(page)
+        self.assertEqual(visited, [
+            links[0].ozon_url, links[0].wildberries_url, links[0].yandex_market_url,
+        ])
+        self.assertEqual(page.wildberries_table.rowCount(), 1)
+        self.assertIn("Загружено: 3; ошибок: 0", page.run_status.text())
 
     def test_ozon_denial_is_logged_for_each_link_without_skipping(self):
         self._assert_denied_marketplace_links_are_tried_individually(

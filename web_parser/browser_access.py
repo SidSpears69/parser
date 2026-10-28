@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 import os
 from pathlib import Path
 import time
 from typing import Callable
-from urllib.parse import quote, quote_plus, urlsplit
+from urllib.parse import parse_qs, quote, quote_plus, urlsplit
 from uuid import uuid4
 
 from playwright.sync_api import Browser, BrowserContext, Error as PlaywrightError
@@ -16,6 +17,7 @@ from playwright_stealth import Stealth
 
 from web_parser.browser_discovery import BrowserInstallation
 from web_parser.config import BROWSERS, SITES
+from web_parser.socks5_relay import Socks5AuthRelay
 
 
 _NAVIGATION_TIMEOUT_MS = 30_000
@@ -48,6 +50,14 @@ _YANDEX_CAPTCHA_CHECK = """() => {
         return !hasResults || (rect.width >= 250 && rect.height >= 180);
     });
 }"""
+_YANDEX_SEARCH_STATE = """() => {
+    const text = (document.body?.innerText || '').trim();
+    if (document.querySelector('[data-auto="searchOrganic"]')) return 'results';
+    if (/ничего не найдено|товары не найдены|ничего не нашлось/i.test(text)) return 'empty';
+    if (text.startsWith('Что-то не сработало')
+            && text.includes('Попробуйте обновить или зайдите позже')) return 'site_error';
+    return null;
+}"""
 
 
 class BrowserAccessError(RuntimeError):
@@ -64,6 +74,13 @@ class BrowserAccessDenied(BrowserAccessError):
     def __init__(self, status: int, reason: str | None = None) -> None:
         self.status = status
         super().__init__(f"HTTP {status}: {reason or 'страница не прошла проверку доступа.'}")
+
+
+class _YandexCaptchaDetected(BrowserAccessDenied):
+    """A Yandex captcha that may disappear on the next navigation attempt."""
+
+    def __init__(self, status: int) -> None:
+        super().__init__(status, "обнаружена капча Яндекс Маркета; страница недоступна.")
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,7 +135,7 @@ def _raise_if_yandex_captcha(page: Page, requested_url: str, status: int) -> Non
     if _is_yandex_market_url(requested_url) and (
         _is_yandex_captcha_redirect(page.url) or page.evaluate(_YANDEX_CAPTCHA_CHECK)
     ):
-        raise BrowserAccessDenied(status, "обнаружена капча Яндекс Маркета; страница недоступна.")
+        raise _YandexCaptchaDetected(status)
 
 
 def browser_profile_dir(site: str, browser: str) -> Path:
@@ -179,6 +196,26 @@ def _browser_stealth() -> Stealth:
     )
 
 
+def _chromium_socks_launch_options(
+    proxy_options: dict[str, dict[str, str]],
+) -> dict[str, list[str]]:
+    """Filter the Playwright SOCKS DNS flag from Chromium launch arguments."""
+    proxy = proxy_options.get("proxy")
+    if proxy is None:
+        return {}
+    parsed = urlsplit(proxy["server"])
+    if parsed.scheme != "socks5" or not parsed.hostname:
+        return {}
+    hostname = parsed.hostname
+    if ":" in hostname:
+        hostname = f"[{hostname}]"
+    return {
+        "ignore_default_args": [
+            f'--host-resolver-rules="MAP * ~NOTFOUND , EXCLUDE {hostname}"',
+        ],
+    }
+
+
 class BrowserPageAccess:
     """Keep one Playwright context for a sequence of URLs in one worker thread.
 
@@ -215,6 +252,24 @@ class BrowserPageAccess:
         self._context: BrowserContext | None = None
         self._page: Page | None = None
         self._navigated_once = False
+        self._proxy_relay: Socks5AuthRelay | None = None
+
+    @property
+    def playwright(self) -> Playwright:
+        if self._playwright is None:
+            raise BrowserAccessError("Сначала откройте сеанс Playwright.")
+        return self._playwright
+
+    @property
+    def effective_proxy(self) -> dict[str, str] | None:
+        """Proxy address that other requests must share with this browser session."""
+        if self._playwright is None:
+            raise BrowserAccessError("Сначала откройте сеанс Playwright.")
+        if self.proxy is None:
+            return None
+        if self._proxy_relay is not None:
+            return {"server": f"socks5://127.0.0.1:{self._proxy_relay.port}"}
+        return self.proxy.copy()
 
     def __enter__(self) -> BrowserPageAccess:
         if self._page is not None:
@@ -229,7 +284,7 @@ class BrowserPageAccess:
 
         try:
             self._playwright = sync_playwright().start()
-            proxy_options = {"proxy": self.proxy} if self.proxy is not None else {}
+            proxy_options = self._browser_proxy_options()
             if name == "Mozilla Firefox":
                 firefox = self._playwright.firefox
                 if not Path(firefox.executable_path).is_file():
@@ -246,10 +301,11 @@ class BrowserPageAccess:
                         **proxy_options,
                     )
             else:
+                chromium_proxy_options = _chromium_socks_launch_options(proxy_options)
                 if self.profile_dir is None:
                     self._browser = self._playwright.chromium.launch(
                         executable_path=str(binary), headless=self.headless,
-                        chromium_sandbox=True, **proxy_options,
+                        chromium_sandbox=True, **proxy_options, **chromium_proxy_options,
                     )
                 else:
                     self.profile_dir.mkdir(parents=True, exist_ok=True)
@@ -260,7 +316,7 @@ class BrowserPageAccess:
                         headless=self.headless, locale="ru-RU",
                         chromium_sandbox=True,
                         timeout=_BROWSER_LAUNCH_TIMEOUT_MS,
-                        **proxy_options,
+                        **proxy_options, **chromium_proxy_options,
                     )
             if self._context is None and self._browser is not None:
                 self._context = self._browser.new_context(locale="ru-RU")
@@ -296,6 +352,28 @@ class BrowserPageAccess:
                 f"Не удалось запустить {name} через Playwright: {self._safe_error(error)}"
             ) from error
         return self
+
+    def _browser_proxy_options(self) -> dict[str, dict[str, str]]:
+        if self.proxy is None:
+            return {}
+        proxy = self.proxy.copy()
+        parsed = urlsplit(proxy.get("server", ""))
+        if parsed.scheme == "socks5" and proxy.get("username"):
+            relay: Socks5AuthRelay | None = None
+            try:
+                relay = Socks5AuthRelay(
+                    proxy["server"], proxy["username"], proxy["password"],
+                )
+                port = relay.start()
+            except (OSError, RuntimeError, ValueError) as error:
+                if relay is not None:
+                    relay.close()
+                raise BrowserAccessError(
+                    f"Не удалось подготовить SOCKS5-прокси: {error}"
+                ) from error
+            self._proxy_relay = relay
+            proxy = {"server": f"socks5://127.0.0.1:{port}"}
+        return {"proxy": proxy}
 
     def __exit__(self, _type: object, _value: object, _traceback: object) -> None:
         if _value is None:
@@ -377,11 +455,7 @@ class BrowserPageAccess:
                         )
                     elif _is_yandex_market_url(url) and urlsplit(url).path.lower().startswith("/search"):
                         page.wait_for_function(
-                            """() => {
-                                const text = document.body?.innerText || '';
-                                return !!document.querySelector('[data-auto="searchOrganic"]')
-                                    || /ничего не найдено|товары не найдены|ничего не нашлось/i.test(text);
-                            }""",
+                            _YANDEX_SEARCH_STATE,
                             timeout=_YANDEX_SEARCH_TIMEOUT_MS,
                         )
                         page.wait_for_timeout(_YANDEX_SETTLE_MS)
@@ -401,12 +475,25 @@ class BrowserPageAccess:
                     continue
                 self._check_cancelled()
                 _raise_if_yandex_captcha(page, url, response.status)
+                if (_is_yandex_market_url(url)
+                        and urlsplit(url).path.lower().startswith("/search")
+                        and page.evaluate(_YANDEX_SEARCH_STATE) == "site_error"):
+                    last_problem = "Яндекс Маркет показал страницу «Что-то не сработало»"
+                    continue
                 html = page.content()
                 self._check_cancelled()
                 if not html.strip():
                     last_problem = "пустой HTML"
                     continue
                 return PageSnapshot(url, page.url, response.status, html, attempt)
+            except _YandexCaptchaDetected as error:
+                if attempt < self.attempts:
+                    continue
+                raise BrowserAccessDenied(
+                    error.status,
+                    f"обнаружена капча Яндекс Маркета; попыток: {self.attempts}; "
+                    "страница недоступна.",
+                ) from error
             except BrowserAccessError:
                 raise
             except PlaywrightError as error:
@@ -415,6 +502,67 @@ class BrowserPageAccess:
         raise BrowserAccessError(
             f"Не удалось получить страницу {url}. Попыток: {self.attempts}; {last_problem}."
         )
+
+    def fetch_wildberries_json(self, url: str) -> object:
+        """Capture storefront JSON after a direct request is denied by the site."""
+        url = _validate_url(url)
+        page = self._page
+        if page is None:
+            raise BrowserAccessError("Сначала откройте сеанс Playwright.")
+        documents: list[object] = []
+        search_query = parse_qs(urlsplit(url).query).get("search", [""])[0]
+
+        def is_search_json(response) -> bool:
+            parts = urlsplit(response.url)
+            return (
+                response.status == 200
+                and parts.hostname in {"www.wildberries.ru", "u-search.wb.ru", "search.wb.ru"}
+                and "/exactmatch/" in parts.path
+                and parts.path.endswith("/search")
+                and parse_qs(parts.query).get("query", [""])[0] == search_query
+            )
+
+        def capture(response) -> None:
+            if is_search_json(response):
+                try:
+                    document = json.loads(response.body())
+                except (PlaywrightError, UnicodeError, ValueError):
+                    return
+                if not isinstance(document, dict):
+                    return
+                products = document.get("products")
+                if products is None and isinstance(document.get("data"), dict):
+                    products = document["data"].get("products")
+                if isinstance(products, list):
+                    documents.append(document)
+
+        page.on("response", capture)
+        try:
+            denial: BrowserAccessDenied | None = None
+            try:
+                self.fetch(url)
+            except BrowserAccessDenied as error:
+                if error.status != 498:
+                    raise
+                # The HTML readiness check can miss a rendered storefront even
+                # though its search JSON was delivered to the browser.
+                denial = error
+            deadline = time.monotonic() + 10
+            while not documents and time.monotonic() < deadline:
+                self._check_cancelled()
+                try:
+                    page.wait_for_event(
+                        "response", predicate=is_search_json, timeout=1_000,
+                    )
+                except PlaywrightTimeoutError:
+                    pass
+            if not documents:
+                if denial is not None:
+                    raise denial
+                raise BrowserAccessError("В открытой выдаче Wildberries не появился JSON товаров.")
+            return documents[-1]
+        finally:
+            page.remove_listener("response", capture)
 
     def _check_cancelled(self) -> None:
         if self._cancel_requested():
@@ -434,6 +582,7 @@ class BrowserPageAccess:
         context, self._context = self._context, None
         browser, self._browser = self._browser, None
         playwright, self._playwright = self._playwright, None
+        proxy_relay, self._proxy_relay = self._proxy_relay, None
         self._page = None
         self._navigated_once = False
         first_error: PlaywrightError | OSError | None = None
@@ -460,6 +609,12 @@ class BrowserPageAccess:
             try:
                 closer()
             except (PlaywrightError, OSError) as error:
+                if first_error is None:
+                    first_error = error
+        if proxy_relay is not None:
+            try:
+                proxy_relay.close()
+            except OSError as error:
                 if first_error is None:
                     first_error = error
         if first_error is not None:
