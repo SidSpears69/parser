@@ -24,6 +24,8 @@ _NAVIGATION_TIMEOUT_MS = 30_000
 _CONTENT_TIMEOUT_MS = 5_000
 _OZON_CHALLENGE_TIMEOUT_MS = 20_000
 _WILDBERRIES_CHALLENGE_TIMEOUT_MS = 20_000
+_WILDBERRIES_JSON_FIRST_WAIT_SECONDS = 45
+_WILDBERRIES_JSON_RETRY_WAIT_SECONDS = 10
 _YANDEX_SEARCH_TIMEOUT_MS = 10_000
 _YANDEX_SETTLE_MS = 750
 _MAX_ATTEMPTS = 3
@@ -504,7 +506,7 @@ class BrowserPageAccess:
         )
 
     def fetch_wildberries_json(self, url: str) -> object:
-        """Capture storefront JSON after a direct request is denied by the site."""
+        """Capture search JSON even when the initial page response is HTTP 498."""
         url = _validate_url(url)
         page = self._page
         if page is None:
@@ -538,29 +540,59 @@ class BrowserPageAccess:
 
         page.on("response", capture)
         try:
-            denial: BrowserAccessDenied | None = None
-            try:
-                self.fetch(url)
-            except BrowserAccessDenied as error:
-                if error.status != 498:
-                    raise
-                # The HTML readiness check can miss a rendered storefront even
-                # though its search JSON was delivered to the browser.
-                denial = error
-            deadline = time.monotonic() + 10
-            while not documents and time.monotonic() < deadline:
+            last_status: int | None = None
+            last_problem = "не появился JSON товаров"
+            for attempt in range(1, self.attempts + 1):
                 self._check_cancelled()
+                if self._navigated_once:
+                    self._sleep(self.pause_seconds)
+                    self._check_cancelled()
+                self._navigated_once = True
                 try:
-                    page.wait_for_event(
-                        "response", predicate=is_search_json, timeout=1_000,
+                    navigation_response = page.goto(
+                        url, wait_until="domcontentloaded", timeout=_NAVIGATION_TIMEOUT_MS,
                     )
-                except PlaywrightTimeoutError:
-                    pass
-            if not documents:
-                if denial is not None:
-                    raise denial
-                raise BrowserAccessError("В открытой выдаче Wildberries не появился JSON товаров.")
-            return documents[-1]
+                except PlaywrightError as error:
+                    if documents:
+                        return documents[-1]
+                    last_problem = f"ошибка браузера: {self._safe_error(error)}"
+                    continue
+                if documents:
+                    return documents[-1]
+                if navigation_response is None:
+                    last_problem = "пустой ответ браузера"
+                    continue
+                last_status = navigation_response.status
+                if not navigation_response.ok and navigation_response.status not in (403, 498):
+                    last_problem = f"HTTP {navigation_response.status}"
+                    if _retryable_status(navigation_response.status):
+                        continue
+                    raise BrowserAccessError(f"Сервер вернул {last_problem}.")
+                wait_seconds = (
+                    _WILDBERRIES_JSON_FIRST_WAIT_SECONDS if attempt == 1
+                    else _WILDBERRIES_JSON_RETRY_WAIT_SECONDS
+                )
+                deadline = time.monotonic() + wait_seconds
+                while not documents and time.monotonic() < deadline:
+                    self._check_cancelled()
+                    try:
+                        page.wait_for_event(
+                            "response", predicate=is_search_json, timeout=1_000,
+                        )
+                    except PlaywrightTimeoutError:
+                        pass
+                    except PlaywrightError as error:
+                        last_problem = f"ошибка браузера: {self._safe_error(error)}"
+                        break
+                if documents:
+                    return documents[-1]
+            if last_status in (403, 498):
+                raise BrowserAccessDenied(
+                    last_status, "в браузере не появился JSON товаров Wildberries.",
+                )
+            raise BrowserAccessError(
+                f"В открытой выдаче Wildberries {last_problem}. Попыток: {self.attempts}."
+            )
         finally:
             page.remove_listener("response", capture)
 

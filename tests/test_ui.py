@@ -22,7 +22,7 @@ from web_parser.browser_access import (
 from web_parser.browser_discovery import BrowserInstallation
 from web_parser.product_links import ProductLinks, ProductLinksError
 from web_parser.ui import MainWindow, SITES
-from web_parser.wildberries import WildberriesHTTPError, WildberriesProduct
+from web_parser.wildberries import WildberriesProduct
 from decimal import Decimal
 
 
@@ -52,6 +52,10 @@ class InterfaceTests(unittest.TestCase):
 
             @staticmethod
             def fetch(_url):
+                return (sample_wildberries_product(),)
+
+            @staticmethod
+            def parse_document(_document):
                 return (sample_wildberries_product(),)
 
         self._wildberries_patch = patch("web_parser.ui.workers.WildberriesClient", FakeWildberriesClient)
@@ -123,6 +127,13 @@ class InterfaceTests(unittest.TestCase):
                     raise denial
                 return PageSnapshot(url, url, 200, "<html>Товар</html>", 1)
 
+            @staticmethod
+            def fetch_wildberries_json(url):
+                visited.append(url)
+                if url in denied_urls:
+                    raise denial
+                return {"products": [{"id": 519585970}]}
+
         class TrackedWildberriesClient:
             def __init__(self, *_args, **_kwargs):
                 pass
@@ -138,6 +149,10 @@ class InterfaceTests(unittest.TestCase):
                 visited.append(url)
                 if url in denied_urls:
                     raise denial
+                return (sample_wildberries_product(),)
+
+            @staticmethod
+            def parse_document(_document):
                 return (sample_wildberries_product(),)
 
         with (
@@ -581,6 +596,13 @@ class InterfaceTests(unittest.TestCase):
                 visited.append(url)
                 return PageSnapshot(url, url, 200, "<html>Товар</html>", 1)
 
+            @staticmethod
+            def fetch_wildberries_json(url):
+                visited.append(url)
+                if url == links[0].wildberries_url:
+                    raise BrowserAccessDenied(503)
+                return {"products": [{"id": 519585970}]}
+
         class FakeWildberriesClient:
             def __init__(self, *, proxy):
                 self.proxy = proxy
@@ -592,10 +614,11 @@ class InterfaceTests(unittest.TestCase):
                 pass
 
             @staticmethod
-            def fetch(url):
-                visited.append(url)
-                if url == links[0].wildberries_url:
-                    raise BrowserAccessError("HTTP 503")
+            def fetch():
+                return (sample_wildberries_product(),)
+
+            @staticmethod
+            def parse_document(_document):
                 return (sample_wildberries_product(),)
 
         with (
@@ -667,6 +690,10 @@ class InterfaceTests(unittest.TestCase):
                     release.wait(3)
                 return PageSnapshot(url, url, 200, "<html>Товар</html>", 1)
 
+            @staticmethod
+            def fetch_wildberries_json(_url):
+                return {"products": [{"id": 519585970}]}
+
         try:
             with patch("web_parser.ui.workers.BrowserPageAccess", PausedAccess):
                 page.start_button.click()
@@ -709,6 +736,10 @@ class InterfaceTests(unittest.TestCase):
                 status = 403 if url == links[0].ozon_url else 200
                 return PageSnapshot(url, url, status, "<html>Товар</html>", 1)
 
+            @staticmethod
+            def fetch_wildberries_json(_url):
+                return {"products": [{"id": 519585970}]}
+
         with patch("web_parser.ui.workers.BrowserPageAccess", ResolvedAccess):
             page.start_button.click()
             self._wait_for_walk(page)
@@ -727,7 +758,7 @@ class InterfaceTests(unittest.TestCase):
         self.assertFalse(hasattr(page, "retry_button"))
         self.assertFalse(hasattr(page, "skip_marketplace_button"))
 
-    def test_wildberries_http_denial_uses_selected_browser_as_fallback(self):
+    def test_wildberries_browser_json_is_parsed_without_direct_search_request(self):
         page = self.window.pages[SITES[0]]
         links = [ProductLinks(
             "42", "https://ozon.example/42",
@@ -758,7 +789,7 @@ class InterfaceTests(unittest.TestCase):
                 visited.append(url)
                 return captured
 
-        class DeniedClient:
+        class BrowserJsonClient:
             def __init__(self, *_args, **_kwargs):
                 pass
 
@@ -770,7 +801,7 @@ class InterfaceTests(unittest.TestCase):
 
             @staticmethod
             def fetch(_url):
-                raise WildberriesHTTPError("Поиск Wildberries", 403)
+                raise AssertionError("Прямой запрос поиска не должен предшествовать браузеру")
 
             @staticmethod
             def parse_document(document):
@@ -780,7 +811,7 @@ class InterfaceTests(unittest.TestCase):
 
         with (
             patch("web_parser.ui.workers.BrowserPageAccess", FakeAccess),
-            patch("web_parser.ui.workers.WildberriesClient", DeniedClient),
+            patch("web_parser.ui.workers.WildberriesClient", BrowserJsonClient),
         ):
             page.start_button.click()
             self._wait_for_walk(page)
@@ -828,6 +859,10 @@ class InterfaceTests(unittest.TestCase):
             @staticmethod
             def fetch(url):
                 return PageSnapshot(url, url, 200, "<html>Товар</html>", 1)
+
+            @staticmethod
+            def fetch_wildberries_json(_url):
+                return {"products": [{"id": 519585970}]}
 
         with patch("web_parser.ui.workers.BrowserPageAccess", FakeAccess):
             page.start_button.click()

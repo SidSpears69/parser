@@ -6,13 +6,13 @@ from urllib.parse import quote, quote_plus
 from PySide6.QtCore import QThread, Signal
 
 from web_parser.browser_access import (
-    BrowserAccessCancelled, BrowserAccessError, BrowserPageAccess, browser_profile_dir,
+    BrowserAccessCancelled, BrowserAccessDenied, BrowserAccessError,
+    BrowserPageAccess, browser_profile_dir,
 )
 from web_parser.browser_discovery import BrowserInstallation
 from web_parser.product_links import ProductLinks, ProductLinksError, fetch_product_links
 from web_parser.wildberries import (
-    WildberriesClient, WildberriesError, WildberriesHTTPError, WildberriesProduct,
-    WildberriesRequestError,
+    WildberriesClient, WildberriesError, WildberriesProduct,
 )
 
 class BrowserWalkThread(QThread):
@@ -76,19 +76,18 @@ class BrowserWalkThread(QThread):
                         self.page_started.emit(product.product_id, marketplace, url, index, total)
                         try:
                             if marketplace == "Wildberries":
-                                self._pause(self.pause_seconds)
-                                if self.stop_requested:
-                                    self.cancelled = True
-                                    return
                                 try:
-                                    parsed = wildberries.fetch(url)
-                                except (WildberriesHTTPError, WildberriesRequestError) as error:
-                                    if error.label != "Поиск Wildberries" or (
-                                        isinstance(error, WildberriesHTTPError)
-                                        and error.status not in (403, 498)
-                                    ):
-                                        raise
                                     document = access.fetch_wildberries_json(url)
+                                except BrowserAccessCancelled:
+                                    raise
+                                except BrowserAccessDenied:
+                                    raise
+                                except BrowserAccessError as browser_error:
+                                    try:
+                                        parsed = wildberries.fetch(url)
+                                    except WildberriesError:
+                                        raise browser_error from None
+                                else:
                                     parsed = wildberries.parse_document(document)
                                 self.wildberries_results[product.product_id] = parsed
                                 self.wildberries_parsed.emit(product.product_id, parsed)
