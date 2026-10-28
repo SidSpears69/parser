@@ -265,6 +265,13 @@ class BrowserPageAccess:
         return self._playwright
 
     @property
+    def page(self) -> Page:
+        """Current browser tab, for reading the rendered marketplace DOM."""
+        if self._page is None:
+            raise BrowserAccessError("Сначала откройте сеанс Playwright.")
+        return self._page
+
+    @property
     def effective_proxy(self) -> dict[str, str] | None:
         """Proxy address that other requests must share with this browser session."""
         if self._playwright is None:

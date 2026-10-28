@@ -20,6 +20,7 @@ from web_parser.browser_access import (
     PageSnapshot, browser_profile_dir,
 )
 from web_parser.browser_discovery import BrowserInstallation
+from web_parser.ozon import OzonProduct
 from web_parser.product_links import ProductLinks, ProductLinksError
 from web_parser.ui import MainWindow, SITES
 from web_parser.wildberries import WildberriesProduct
@@ -30,6 +31,13 @@ def sample_wildberries_product() -> WildberriesProduct:
     return WildberriesProduct(
         519585970, "https://basket-28.wbbasket.ru/vol5195/part519585/519585970/images/c516x688/1.webp",
         Decimal("3229"), Decimal("930"), "Шнур", Decimal("4.9"), 26,
+    )
+
+
+def sample_ozon_product() -> OzonProduct:
+    return OzonProduct(
+        "https://ir.ozone.ru/s3/test/photo.jpg", Decimal("1000"), Decimal("750"),
+        "Шнур Ozon", Decimal("4.8"), 12,
     )
 
 
@@ -60,8 +68,14 @@ class InterfaceTests(unittest.TestCase):
 
         self._wildberries_patch = patch("web_parser.ui.workers.WildberriesClient", FakeWildberriesClient)
         self._wildberries_patch.start()
+        self._ozon_patch = patch(
+            "web_parser.ui.workers.parse_ozon_search",
+            return_value=(sample_ozon_product(),),
+        )
+        self._ozon_patch.start()
 
     def tearDown(self):
+        self._ozon_patch.stop()
         self._wildberries_patch.stop()
         self.window.close()
         self.window.deleteLater()
@@ -744,8 +758,20 @@ class InterfaceTests(unittest.TestCase):
             page.start_button.click()
             self._wait_for_walk(page)
         self.assertIn("Загружено: 3; ошибок: 0", page.run_status.text())
+        self.assertEqual(page.ozon_table.rowCount(), 1)
+        self.assertEqual(page.ozon_table.item(0, 1).text(), "Шнур Ozon")
+        self.assertEqual(page.ozon_table.item(0, 2).text(), "1000.00")
+        self.assertEqual(page.ozon_table.item(0, 3).text(), "750.00")
+        self.assertEqual(page.ozon_table.item(0, 4).text(), "4.8")
+        self.assertEqual(page.ozon_table.item(0, 5).text(), "12")
+        self.assertEqual(page.ozon_results["42"], (sample_ozon_product(),))
+        with patch("web_parser.ui.site.QDesktopServices.openUrl", return_value=True) as open_url:
+            page.ozon_table.cellClicked.emit(0, 6)
+        open_url.assert_called_once()
+        self.assertEqual(open_url.call_args.args[0].toString(), sample_ozon_product().image_url)
         self.assertEqual(page.wildberries_table.rowCount(), 1)
         self.assertEqual(page.wildberries_table.item(0, 1).text(), "Шнур")
+        self.assertEqual(page.wildberries_table.item(0, 1).toolTip(), "Артикул WB: 519585970")
         self.assertEqual(page.wildberries_table.item(0, 2).text(), "3229.00")
         self.assertEqual(page.wildberries_table.item(0, 3).text(), "930.00")
         self.assertEqual(page.wildberries_table.item(0, 4).text(), "4.9")

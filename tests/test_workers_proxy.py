@@ -6,11 +6,73 @@ from unittest.mock import patch
 
 from web_parser.browser_access import BrowserAccessError, PageSnapshot
 from web_parser.browser_discovery import BrowserInstallation
+from web_parser.ozon import OzonError
 from web_parser.product_links import ProductLinks
 from web_parser.ui.workers import BrowserWalkThread
 
 
 class WorkerProxyTests(unittest.TestCase):
+    def test_ozon_parse_error_is_logged_and_next_link_is_visited(self):
+        links = tuple(ProductLinks(
+            str(index), f"https://ozon.example/{index}",
+            f"https://wildberries.example/{index}", f"https://market.example/{index}",
+        ) for index in (1, 2))
+        visited = []
+        failures = []
+
+        class FakeAccess:
+            def __init__(self, *_args, **_options):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                pass
+
+            @staticmethod
+            def fetch(url):
+                visited.append(url)
+                return PageSnapshot(url, url, 200, "<html>ok</html>", 1)
+
+            @staticmethod
+            def fetch_wildberries_json(url):
+                visited.append(url)
+                return {"products": []}
+
+        class FakeWildberriesClient:
+            def __init__(self, **_options):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                pass
+
+            @staticmethod
+            def parse_document(_document):
+                return ()
+
+        worker = BrowserWalkThread(
+            "sail-master.ru", BrowserInstallation("Google Chrome", Path(__file__)),
+            links, 0,
+        )
+        worker.page_failed.connect(lambda *args: failures.append(args))
+        with (
+            patch("web_parser.ui.workers.BrowserPageAccess", FakeAccess),
+            patch("web_parser.ui.workers.WildberriesClient", FakeWildberriesClient),
+            patch("web_parser.ui.workers.parse_ozon_search", side_effect=(
+                OzonError("нет карточек"), (),
+            )),
+        ):
+            worker.run()
+
+        self.assertEqual(worker.loaded, 5)
+        self.assertEqual(worker.failed, 1)
+        self.assertEqual(failures[0][0:2], ("1", "Ozon"))
+        self.assertEqual(visited[-1], links[1].yandex_market_url)
+
     def test_wildberries_request_uses_browser_relay(self):
         upstream = {
             "server": "socks5://upstream.example:63397",
@@ -68,6 +130,7 @@ class WorkerProxyTests(unittest.TestCase):
         with (
             patch("web_parser.ui.workers.BrowserPageAccess", FakeAccess),
             patch("web_parser.ui.workers.WildberriesClient", FakeWildberriesClient),
+            patch("web_parser.ui.workers.parse_ozon_search", return_value=()),
         ):
             worker.run()
 
@@ -121,6 +184,7 @@ class WorkerProxyTests(unittest.TestCase):
         with (
             patch("web_parser.ui.workers.BrowserPageAccess", FakeAccess),
             patch("web_parser.ui.workers.WildberriesClient", FakeWildberriesClient),
+            patch("web_parser.ui.workers.parse_ozon_search", return_value=()),
         ):
             worker.run()
 
