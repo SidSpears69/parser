@@ -1,14 +1,13 @@
 """Offline UI checks: python -m unittest discover -s tests -v."""
 
 import os
+from decimal import Decimal
 from pathlib import Path
 import tempfile
 from threading import Event
 import time
 import unittest
 from unittest.mock import patch
-
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QPoint, Qt, QTime
 from PySide6.QtTest import QTest
@@ -24,12 +23,11 @@ from web_parser.ozon import OzonProduct
 from web_parser.product_links import ProductLinks, ProductLinksError
 from web_parser.ui import MainWindow, SITES
 from web_parser.wildberries import WildberriesProduct
-from decimal import Decimal
 
 
 def sample_wildberries_product() -> WildberriesProduct:
     return WildberriesProduct(
-        519585970, "https://basket-28.wbbasket.ru/vol5195/part519585/519585970/images/c516x688/1.webp",
+        519585970, "https://basket-28.wbbasket.ru/vol5195/part519585/519585970/images/big/1.webp",
         Decimal("3229"), Decimal("930"), "Шнур", Decimal("4.9"), 26,
     )
 
@@ -44,10 +42,12 @@ def sample_ozon_product() -> OzonProduct:
 class InterfaceTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
         cls.app = create_application([])
 
     def setUp(self):
         self.window = MainWindow()
+
         class FakeWildberriesClient:
             def __init__(self, *_args, **_kwargs):
                 pass
@@ -429,6 +429,7 @@ class InterfaceTests(unittest.TestCase):
         self.assertEqual(first.product_links, tuple(expected))
         self.assertEqual(second.product_links, ())
         self.assertEqual(first.links_preview.rowCount(), 20)
+
         def cell_text(column: int) -> str:
             item = first.links_preview.item(0, column)
             if item is None:

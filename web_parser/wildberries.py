@@ -171,7 +171,7 @@ def parse_search_json(document: object, routes_document: object) -> tuple[Wildbe
         if route is None:
             raise WildberriesError(f"Товар Wildberries №{position}: не найден CDN для фото.")
         image_url = (
-            f"https://{route.host}/vol{volume}/part{wb_id // 1000}/{wb_id}/images/c516x688/1.webp"
+            f"https://{route.host}/vol{volume}/part{wb_id // 1000}/{wb_id}/images/big/1.webp"
         )
         pics_update = raw.get("picsUpdate")
         if type(pics_update) is int and pics_update >= 0:

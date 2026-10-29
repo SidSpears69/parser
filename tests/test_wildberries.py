@@ -55,7 +55,7 @@ class WildberriesParserTests(unittest.TestCase):
         self.assertEqual(first.reviews, 26)
         self.assertEqual(
             first.image_url,
-            "https://basket-28.wbbasket.ru/vol5195/part519585/519585970/images/c516x688/1.webp?picsUpdate=2",
+            "https://basket-28.wbbasket.ru/vol5195/part519585/519585970/images/big/1.webp?picsUpdate=2",
         )
 
     def test_legacy_prices_nested_data_and_no_results(self):

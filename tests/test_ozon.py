@@ -12,7 +12,7 @@ from web_parser.ozon import OzonError, parse_ozon_cards, parse_ozon_search
 
 def card(**changes: object) -> dict[str, object]:
     item: dict[str, object] = {
-        "image_url": "https://ir.ozone.ru/s3/multimedia/photo.jpg",
+        "image_url": "https://ir.ozone.ru/s3/multimedia/wc500/photo.jpg",
         "current_price": "11\u2009747\u2009₽",
         "original_price": "28\u2009650\u2009₽28\u2009650\u2009₽",
         "name": "Шнур яхтенный Classic",
@@ -45,6 +45,14 @@ class OzonTests(unittest.TestCase):
         self.assertEqual(product.discounted_price, product.price)
         self.assertIsNone(product.rating)
         self.assertEqual(product.reviews, 0)
+
+    def test_image_url_keeps_query_without_width_transform(self):
+        product, = parse_ozon_cards([card(
+            image_url="https://ir.ozone.ru/s3/multimedia-1/wc1000/photo.jpg?v=2",
+        )])
+        self.assertEqual(
+            product.image_url, "https://ir.ozone.ru/s3/multimedia-1/photo.jpg?v=2",
+        )
 
     def test_compact_review_count(self):
         product, = parse_ozon_cards([card(reviews="1,2 тыс. отзывов", rating="4,7")])

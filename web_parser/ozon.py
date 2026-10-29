@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import Decimal
 import re
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -85,6 +85,13 @@ def _reviews(value: object, position: int) -> int:
     return int(count)
 
 
+def _unscaled_image_url(image_url: str) -> str:
+    """Remove Ozon's card-width transform from the primary image URL."""
+    parts = urlsplit(image_url)
+    path = re.sub(r"/wc\d+/", "/", parts.path, count=1)
+    return urlunsplit((parts.scheme, parts.netloc, path, parts.query, parts.fragment))
+
+
 def parse_ozon_cards(raw_cards: object) -> tuple[OzonProduct, ...]:
     """Validate browser-extracted fields while retaining search result order."""
     if not isinstance(raw_cards, list):
@@ -114,7 +121,7 @@ def parse_ozon_cards(raw_cards: object) -> tuple[OzonProduct, ...]:
             if not 0 <= rating <= 5:
                 raise OzonError(f"Товар Ozon №{position}: неверный рейтинг.")
         result.append(OzonProduct(
-            image_url, price, discounted_price, name.strip(), rating,
+            _unscaled_image_url(image_url), price, discounted_price, name.strip(), rating,
             _reviews(card.get("reviews"), position),
         ))
     return tuple(result)
