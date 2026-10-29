@@ -418,6 +418,9 @@ class BrowserAccessTests(unittest.TestCase):
         with self.access() as access:
             result = access.fetch(YANDEX_URL)
         self.assertEqual(result.status, 200)
+        self.page.goto.assert_called_once_with(
+            YANDEX_URL, wait_until="domcontentloaded", timeout=30_000,
+        )
         self.assertIn("searchOrganic", self.page.wait_for_function.call_args.args[0])
         self.assertEqual(self.page.wait_for_function.call_args.kwargs["timeout"], 10_000)
         self.page.wait_for_timeout.assert_called_once_with(750)

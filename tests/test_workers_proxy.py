@@ -65,6 +65,7 @@ class WorkerProxyTests(unittest.TestCase):
             patch("web_parser.ui.workers.parse_ozon_search", side_effect=(
                 OzonError("нет карточек"), (),
             )),
+            patch("web_parser.ui.workers.parse_yandex_search", return_value=()),
         ):
             worker.run()
 
@@ -131,6 +132,7 @@ class WorkerProxyTests(unittest.TestCase):
             patch("web_parser.ui.workers.BrowserPageAccess", FakeAccess),
             patch("web_parser.ui.workers.WildberriesClient", FakeWildberriesClient),
             patch("web_parser.ui.workers.parse_ozon_search", return_value=()),
+            patch("web_parser.ui.workers.parse_yandex_search", return_value=()),
         ):
             worker.run()
 
@@ -185,6 +187,7 @@ class WorkerProxyTests(unittest.TestCase):
             patch("web_parser.ui.workers.BrowserPageAccess", FakeAccess),
             patch("web_parser.ui.workers.WildberriesClient", FakeWildberriesClient),
             patch("web_parser.ui.workers.parse_ozon_search", return_value=()),
+            patch("web_parser.ui.workers.parse_yandex_search", return_value=()),
         ):
             worker.run()
 

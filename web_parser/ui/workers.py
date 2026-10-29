@@ -15,6 +15,8 @@ from web_parser.product_links import ProductLinks, ProductLinksError, fetch_prod
 from web_parser.wildberries import (
     WildberriesClient, WildberriesError, WildberriesProduct,
 )
+from web_parser.yandex_market import YandexMarketError, YandexMarketProduct, parse_yandex_search
+
 
 class BrowserWalkThread(QThread):
     """Visit search pages and collect the first six marketplace products."""
@@ -24,6 +26,7 @@ class BrowserWalkThread(QThread):
     page_failed = Signal(str, str, str, int, int, str)
     ozon_parsed = Signal(str, object)
     wildberries_parsed = Signal(str, object)
+    yandex_parsed = Signal(str, object)
 
     def __init__(
         self, site: str, installation: BrowserInstallation, links: tuple[ProductLinks, ...],
@@ -41,6 +44,7 @@ class BrowserWalkThread(QThread):
         self.error: str | None = None
         self.ozon_results: dict[str, tuple[OzonProduct, ...]] = {}
         self.wildberries_results: dict[str, tuple[WildberriesProduct, ...]] = {}
+        self.yandex_results: dict[str, tuple[YandexMarketProduct, ...]] = {}
         self._stop_event = Event()
 
     @property
@@ -102,10 +106,16 @@ class BrowserWalkThread(QThread):
                                     parsed_ozon = parse_ozon_search(access)
                                     self.ozon_results[product.product_id] = parsed_ozon
                                     self.ozon_parsed.emit(product.product_id, parsed_ozon)
+                                else:
+                                    parsed_yandex = parse_yandex_search(access)
+                                    self.yandex_results[product.product_id] = parsed_yandex
+                                    self.yandex_parsed.emit(product.product_id, parsed_yandex)
                         except BrowserAccessCancelled:
                             self.cancelled = True
                             return
-                        except (BrowserAccessError, OzonError, WildberriesError) as error:
+                        except (
+                            BrowserAccessError, OzonError, WildberriesError, YandexMarketError,
+                        ) as error:
                             self.failed += 1
                             self.page_failed.emit(
                                 product.product_id, marketplace, url, index, total, str(error),
@@ -115,7 +125,7 @@ class BrowserWalkThread(QThread):
                             self.page_loaded.emit(
                                 product.product_id, marketplace, index, total, status,
                             )
-        except (BrowserAccessError, OzonError, WildberriesError) as error:
+        except (BrowserAccessError, OzonError, WildberriesError, YandexMarketError) as error:
             if self.stop_requested:
                 self.cancelled = True
             else:

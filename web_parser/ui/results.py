@@ -8,6 +8,7 @@ from PySide6.QtWidgets import QHeaderView, QTableWidgetItem
 from web_parser.ozon import OzonProduct
 from web_parser.ui.links import LinksPreviewTable
 from web_parser.wildberries import WildberriesProduct
+from web_parser.yandex_market import YandexMarketProduct
 
 
 _VISIBLE_ROW_LIMIT = 120
@@ -29,7 +30,8 @@ class MarketplaceResultsTable(LinksPreviewTable):
             self.setColumnWidth(column, width)
 
     def append_products(
-        self, product_id: str, products: Sequence[OzonProduct | WildberriesProduct],
+        self, product_id: str,
+        products: Sequence[OzonProduct | WildberriesProduct | YandexMarketProduct],
     ) -> None:
         """Append parsed products with shared formatting and photo links."""
         for product in products:

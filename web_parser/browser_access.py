@@ -36,7 +36,9 @@ _YANDEX_CAPTCHA_CHECK = """() => {
     const title = document.title || '';
     const text = (document.body?.innerText || '').slice(0, 3000).replace(/\\s+/g, ' ');
     if (/^(?:captcha|капча)(?:\\s|$|[.!?—-])|подтвердите.*не робот|проверка.*(?:безопасности|робот)/i.test(title)
-            || /(?:подтвердите|докажите).{0,100}(?:не робот|человек)|запросы.{0,100}похожи на автоматические|(?:введите|укажите).{0,80}символы.{0,80}(?:картинк|изображени)/i.test(text)) {
+            || /(?:подтвердите|докажите).{0,100}(?:не робот|человек)/i.test(text)
+            || /запросы.{0,100}похожи на автоматические/i.test(text)
+            || /(?:введите|укажите).{0,80}символы.{0,80}(?:картинк|изображени)/i.test(text)) {
         return true;
     }
     const hasResults = !!document.querySelector('[data-auto="searchOrganic"]');
@@ -411,7 +413,9 @@ class BrowserPageAccess:
             self._navigated_once = True
             try:
                 response = page.goto(
-                    url, wait_until="load", timeout=_NAVIGATION_TIMEOUT_MS,
+                    url,
+                    wait_until="domcontentloaded" if _is_yandex_market_url(url) else "load",
+                    timeout=_NAVIGATION_TIMEOUT_MS,
                 )
                 self._check_cancelled()
                 if response is None:

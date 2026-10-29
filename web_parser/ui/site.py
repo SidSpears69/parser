@@ -24,15 +24,39 @@ from web_parser.ui.widgets import (
 )
 from web_parser.ui.workers import BrowserWalkThread, ProductLinksFetchThread
 from web_parser.ui.wildberries import WildberriesResultsTable
+from web_parser.ui.yandex_market import YandexMarketResultsTable
 from web_parser.wildberries import WildberriesProduct
+from web_parser.yandex_market import YandexMarketProduct
 
 BROWSERS = config.BROWSERS
 _INTERVAL_LABELS = ("часов", "дней", "недель", "месяцев")
-_Product = TypeVar("_Product", OzonProduct, WildberriesProduct)
+_Product = TypeVar("_Product", OzonProduct, WildberriesProduct, YandexMarketProduct)
+
 
 def _soft_wrap(text: str, chunk_size: int = 32) -> str:
     """Allow long URL and path fragments to wrap without visible separators."""
     return "\u200b".join(text[index:index + chunk_size] for index in range(0, len(text), chunk_size))
+
+
+def _results_panel(
+    title: str, table: MarketplaceResultsTable, object_name: str,
+    on_photo_click: Callable[[int, int], None],
+) -> tuple[QWidget, QLabel]:
+    panel, panel_layout = section(title)
+    table.setObjectName(object_name)
+    table.verticalHeader().setVisible(False)
+    table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+    table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+    table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+    table.setAlternatingRowColors(True)
+    table.setWordWrap(True)
+    table.setMinimumHeight(190)
+    table.cellClicked.connect(on_photo_click)
+    panel_layout.addWidget(table)
+    hint = label("После запуска здесь появятся первые шесть товаров каждой выдачи.", "hint")
+    hint.setWordWrap(True)
+    panel_layout.addWidget(hint)
+    return panel, hint
 
 
 class SitePage(QWidget):
@@ -54,6 +78,7 @@ class SitePage(QWidget):
         self._product_links: tuple[ProductLinks, ...] = ()
         self._ozon_results: dict[str, tuple[OzonProduct, ...]] = {}
         self._wildberries_results: dict[str, tuple[WildberriesProduct, ...]] = {}
+        self._yandex_results: dict[str, tuple[YandexMarketProduct, ...]] = {}
         self._shutting_down = False
         self.setObjectName("sitePage")
         layout = QVBoxLayout(self)
@@ -245,43 +270,25 @@ class SitePage(QWidget):
         links_layout.addWidget(self.links_preview_hint)
         layout.addWidget(links_panel)
 
-        ozon_panel, ozon_layout = section("Результаты Ozon")
         self.ozon_table = OzonResultsTable()
-        self.ozon_table.setObjectName("ozonResults")
-        self.ozon_table.verticalHeader().setVisible(False)
-        self.ozon_table.verticalHeader().setSectionResizeMode(
-            QHeaderView.ResizeMode.ResizeToContents
+        ozon_panel, self.ozon_hint = _results_panel(
+            "Результаты Ozon", self.ozon_table, "ozonResults", self._open_ozon_photo,
         )
-        self.ozon_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.ozon_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.ozon_table.setAlternatingRowColors(True)
-        self.ozon_table.setWordWrap(True)
-        self.ozon_table.setMinimumHeight(190)
-        self.ozon_table.cellClicked.connect(self._open_ozon_photo)
-        ozon_layout.addWidget(self.ozon_table)
-        self.ozon_hint = label("После запуска здесь появятся первые шесть товаров каждой выдачи.", "hint")
-        self.ozon_hint.setWordWrap(True)
-        ozon_layout.addWidget(self.ozon_hint)
         layout.addWidget(ozon_panel)
 
-        results_panel, results_layout = section("Результаты Wildberries")
         self.wildberries_table = WildberriesResultsTable()
-        self.wildberries_table.setObjectName("wildberriesResults")
-        self.wildberries_table.verticalHeader().setVisible(False)
-        self.wildberries_table.verticalHeader().setSectionResizeMode(
-            QHeaderView.ResizeMode.ResizeToContents
+        wildberries_panel, self.wildberries_hint = _results_panel(
+            "Результаты Wildberries", self.wildberries_table, "wildberriesResults",
+            self._open_wildberries_photo,
         )
-        self.wildberries_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.wildberries_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.wildberries_table.setAlternatingRowColors(True)
-        self.wildberries_table.setWordWrap(True)
-        self.wildberries_table.setMinimumHeight(190)
-        self.wildberries_table.cellClicked.connect(self._open_wildberries_photo)
-        results_layout.addWidget(self.wildberries_table)
-        self.wildberries_hint = label("После запуска здесь появятся первые шесть товаров каждой выдачи.", "hint")
-        self.wildberries_hint.setWordWrap(True)
-        results_layout.addWidget(self.wildberries_hint)
-        layout.addWidget(results_panel)
+        layout.addWidget(wildberries_panel)
+
+        self.yandex_table = YandexMarketResultsTable()
+        yandex_panel, self.yandex_hint = _results_panel(
+            "Результаты Яндекс Маркета", self.yandex_table, "yandexResults",
+            self._open_yandex_photo,
+        )
+        layout.addWidget(yandex_panel)
 
         self.log = ErrorLog(site)
         layout.addWidget(self.log, 1)
@@ -306,6 +313,10 @@ class SitePage(QWidget):
     def ozon_results(self) -> dict[str, tuple[OzonProduct, ...]]:
         return self._ozon_results.copy()
 
+    @property
+    def yandex_results(self) -> dict[str, tuple[YandexMarketProduct, ...]]:
+        return self._yandex_results.copy()
+
     def _clear_ozon_results(self) -> None:
         self._ozon_results = {}
         self.ozon_table.reset_link_hover()
@@ -317,6 +328,12 @@ class SitePage(QWidget):
         self.wildberries_table.reset_link_hover()
         self.wildberries_table.setRowCount(0)
         self.wildberries_hint.setText("После запуска здесь появятся первые шесть товаров каждой выдачи.")
+
+    def _clear_yandex_results(self) -> None:
+        self._yandex_results = {}
+        self.yandex_table.reset_link_hover()
+        self.yandex_table.setRowCount(0)
+        self.yandex_hint.setText("После запуска здесь появятся первые шесть товаров каждой выдачи.")
 
     @property
     def links_fetch_in_progress(self) -> bool:
@@ -331,6 +348,7 @@ class SitePage(QWidget):
             self._product_links = ()
             self._clear_ozon_results()
             self._clear_wildberries_results()
+            self._clear_yandex_results()
             self.links_preview.reset_link_hover()
             self.links_preview.setRowCount(0)
             self.links_status.setText("Ссылки ещё не загружены.")
@@ -361,6 +379,7 @@ class SitePage(QWidget):
         self._product_links = ()
         self._clear_ozon_results()
         self._clear_wildberries_results()
+        self._clear_yandex_results()
         self.links_preview.reset_link_hover()
         self.links_preview.setRowCount(0)
         self._update_browser_controls()
@@ -450,17 +469,19 @@ class SitePage(QWidget):
                 QDesktopServices.openUrl(QUrl(url))
 
     def _open_wildberries_photo(self, row: int, column: int) -> None:
-        if column != 6:
-            return
-        item = self.wildberries_table.item(row, column)
-        url = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
-        if isinstance(url, str):
-            QDesktopServices.openUrl(QUrl(url))
+        self._open_results_photo(self.wildberries_table, row, column)
 
     def _open_ozon_photo(self, row: int, column: int) -> None:
+        self._open_results_photo(self.ozon_table, row, column)
+
+    def _open_yandex_photo(self, row: int, column: int) -> None:
+        self._open_results_photo(self.yandex_table, row, column)
+
+    @staticmethod
+    def _open_results_photo(table: MarketplaceResultsTable, row: int, column: int) -> None:
         if column != 6:
             return
-        item = self.ozon_table.item(row, column)
+        item = table.item(row, column)
         url = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
         if isinstance(url, str):
             QDesktopServices.openUrl(QUrl(url))
@@ -552,6 +573,7 @@ class SitePage(QWidget):
         self._walk_thread = thread
         self._clear_ozon_results()
         self._clear_wildberries_results()
+        self._clear_yandex_results()
         self.state_label.setText("Запуск…")
         self.run_status.setText(
             f"Запускается {installation.name}; заданий в очереди: {len(self._product_links) * 3}."
@@ -561,6 +583,7 @@ class SitePage(QWidget):
         thread.page_failed.connect(self._walk_page_failed)
         thread.ozon_parsed.connect(self._walk_ozon_parsed)
         thread.wildberries_parsed.connect(self._walk_wildberries_parsed)
+        thread.yandex_parsed.connect(self._walk_yandex_parsed)
         thread.finished.connect(self._walk_finished)
         thread.start()
         self._update_links_controls()
@@ -601,7 +624,7 @@ class SitePage(QWidget):
                 + ("страница открылась после проверки браузера (первичный HTTP 403)"
                    if status == 403 else f"HTTP {status}")
                 if marketplace == "Ozon" else
-                f"HTTP {status}"
+                f"карточек: {len(self._yandex_results.get(product_id, ()))}; HTTP {status}"
             )
             self.run_status.setText(f"Загружено {index}/{total}: {marketplace}, товар {product_id}, {detail}.")
 
@@ -636,6 +659,15 @@ class SitePage(QWidget):
             self.wildberries_table, self.wildberries_hint,
         )
 
+    @Slot(str, object)
+    def _walk_yandex_parsed(
+        self, product_id: str, products: tuple[YandexMarketProduct, ...],
+    ) -> None:
+        self._show_parsed_products(
+            product_id, products, self._yandex_results, self.yandex_table,
+            self.yandex_hint,
+        )
+
     @Slot(str, str, str, int, int, str)
     def _walk_page_failed(
         self, product_id: str, marketplace: str, url: str, index: int, total: int, message: str,
@@ -661,7 +693,8 @@ class SitePage(QWidget):
                 self.run_status.setText(
                     f"{ending}. Загружено: {thread.loaded}; ошибок: {thread.failed}; "
                     f"товаров Ozon: {sum(len(items) for items in self._ozon_results.values())}; "
-                    f"товаров Wildberries: {sum(len(items) for items in self._wildberries_results.values())}."
+                    f"товаров Wildberries: {sum(len(items) for items in self._wildberries_results.values())}; "
+                    f"товаров Яндекс Маркета: {sum(len(items) for items in self._yandex_results.values())}."
                 )
             self._update_links_controls()
         thread.deleteLater()
