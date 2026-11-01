@@ -10,6 +10,7 @@ from web_parser.browser_access import (
     BrowserPageAccess, browser_profile_dir,
 )
 from web_parser.browser_discovery import BrowserInstallation
+from web_parser.images import ImageDownloadCancelled, ImageStore, SavedImage
 from web_parser.ozon import OzonError, OzonProduct, parse_ozon_search
 from web_parser.product_links import ProductLinks, ProductLinksError, fetch_product_links
 from web_parser.wildberries import (
@@ -27,6 +28,7 @@ class BrowserWalkThread(QThread):
     ozon_parsed = Signal(str, object)
     wildberries_parsed = Signal(str, object)
     yandex_parsed = Signal(str, object)
+    image_failed = Signal(str, str, str, str)
 
     def __init__(
         self, site: str, installation: BrowserInstallation, links: tuple[ProductLinks, ...],
@@ -45,6 +47,8 @@ class BrowserWalkThread(QThread):
         self.ozon_results: dict[str, tuple[OzonProduct, ...]] = {}
         self.wildberries_results: dict[str, tuple[WildberriesProduct, ...]] = {}
         self.yandex_results: dict[str, tuple[YandexMarketProduct, ...]] = {}
+        self.saved_images: dict[tuple[str, str], tuple[SavedImage, ...]] = {}
+        self.image_failures = 0
         self._stop_event = Event()
 
     @property
@@ -70,6 +74,11 @@ class BrowserWalkThread(QThread):
                 proxy=getattr(access, "effective_proxy", self.proxy),
                 playwright=getattr(access, "playwright", None),
             ) as wildberries:
+                images = ImageStore(
+                    lambda: access.page.request,
+                    cancel_requested=self._stop_event.is_set,
+                    sleep=self._pause,
+                )
                 for product in self.links:
                     for marketplace, url in (
                         ("Ozon", product.ozon_url),
@@ -98,6 +107,7 @@ class BrowserWalkThread(QThread):
                                     parsed = wildberries.parse_document(document)
                                 self.wildberries_results[product.product_id] = parsed
                                 self.wildberries_parsed.emit(product.product_id, parsed)
+                                parsed_products = parsed
                                 status = 200
                             else:
                                 snapshot = access.fetch(url)
@@ -106,11 +116,23 @@ class BrowserWalkThread(QThread):
                                     parsed_ozon = parse_ozon_search(access)
                                     self.ozon_results[product.product_id] = parsed_ozon
                                     self.ozon_parsed.emit(product.product_id, parsed_ozon)
+                                    parsed_products = parsed_ozon
                                 else:
                                     parsed_yandex = parse_yandex_search(access)
                                     self.yandex_results[product.product_id] = parsed_yandex
                                     self.yandex_parsed.emit(product.product_id, parsed_yandex)
-                        except BrowserAccessCancelled:
+                                    parsed_products = parsed_yandex
+                            batch = images.save_products(
+                                self.site, product.product_id, marketplace, parsed_products, url,
+                            )
+                            self.saved_images[(product.product_id, marketplace)] = batch.saved
+                            for failure in batch.failed:
+                                self.image_failures += 1
+                                self.image_failed.emit(
+                                    product.product_id, marketplace, failure.source_url,
+                                    f"Фото №{failure.position}: {failure.reason}",
+                                )
+                        except (BrowserAccessCancelled, ImageDownloadCancelled):
                             self.cancelled = True
                             return
                         except (

@@ -11,6 +11,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 from web_parser.app import create_application
+from web_parser.images import ImageBatch
 from web_parser.ozon import OzonProduct
 from web_parser.product_links import ProductLinks
 from web_parser.ui import MainWindow
@@ -24,11 +25,13 @@ def sample_wildberries_product() -> WildberriesProduct:
         Decimal("3229"), Decimal("930"), "Шнур", Decimal("4.9"), 26,
     )
 
+
 def sample_ozon_product() -> OzonProduct:
     return OzonProduct(
         "https://ir.ozone.ru/s3/test/photo.jpg", Decimal("1000"), Decimal("750"),
         "Шнур Ozon", Decimal("4.8"), 12,
     )
+
 
 def sample_yandex_product() -> YandexMarketProduct:
     return YandexMarketProduct(
@@ -77,7 +80,19 @@ class UiTestCase(unittest.TestCase):
         )
         self._yandex_patch.start()
 
+        class FakeImageStore:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            @staticmethod
+            def save_products(*_args):
+                return ImageBatch((), ())
+
+        self._images_patch = patch("web_parser.ui.workers.ImageStore", FakeImageStore)
+        self._images_patch.start()
+
     def tearDown(self):
+        self._images_patch.stop()
         self._yandex_patch.stop()
         self._ozon_patch.stop()
         self._wildberries_patch.stop()

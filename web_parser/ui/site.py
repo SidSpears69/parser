@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
 
 from web_parser import config
 from web_parser.browser_discovery import BrowserInstallation
+from web_parser.images import SavedImage
 from web_parser.ozon import OzonProduct
 from web_parser.product_links import ProductLinks
 from web_parser.ui.links import LinksPreviewTable
@@ -79,6 +80,7 @@ class SitePage(QWidget):
         self._ozon_results: dict[str, tuple[OzonProduct, ...]] = {}
         self._wildberries_results: dict[str, tuple[WildberriesProduct, ...]] = {}
         self._yandex_results: dict[str, tuple[YandexMarketProduct, ...]] = {}
+        self._saved_images: dict[tuple[str, str], tuple[SavedImage, ...]] = {}
         self._shutting_down = False
         self.setObjectName("sitePage")
         layout = QVBoxLayout(self)
@@ -317,6 +319,10 @@ class SitePage(QWidget):
     def yandex_results(self) -> dict[str, tuple[YandexMarketProduct, ...]]:
         return self._yandex_results.copy()
 
+    @property
+    def saved_images(self) -> dict[tuple[str, str], tuple[SavedImage, ...]]:
+        return self._saved_images.copy()
+
     def _clear_ozon_results(self) -> None:
         self._ozon_results = {}
         self.ozon_table.reset_link_hover()
@@ -349,6 +355,7 @@ class SitePage(QWidget):
             self._clear_ozon_results()
             self._clear_wildberries_results()
             self._clear_yandex_results()
+            self._saved_images = {}
             self.links_preview.reset_link_hover()
             self.links_preview.setRowCount(0)
             self.links_status.setText("Ссылки ещё не загружены.")
@@ -380,6 +387,7 @@ class SitePage(QWidget):
         self._clear_ozon_results()
         self._clear_wildberries_results()
         self._clear_yandex_results()
+        self._saved_images = {}
         self.links_preview.reset_link_hover()
         self.links_preview.setRowCount(0)
         self._update_browser_controls()
@@ -574,6 +582,7 @@ class SitePage(QWidget):
         self._clear_ozon_results()
         self._clear_wildberries_results()
         self._clear_yandex_results()
+        self._saved_images = {}
         self.state_label.setText("Запуск…")
         self.run_status.setText(
             f"Запускается {installation.name}; заданий в очереди: {len(self._product_links) * 3}."
@@ -584,6 +593,7 @@ class SitePage(QWidget):
         thread.ozon_parsed.connect(self._walk_ozon_parsed)
         thread.wildberries_parsed.connect(self._walk_wildberries_parsed)
         thread.yandex_parsed.connect(self._walk_yandex_parsed)
+        thread.image_failed.connect(self._walk_image_failed)
         thread.finished.connect(self._walk_finished)
         thread.start()
         self._update_links_controls()
@@ -668,6 +678,13 @@ class SitePage(QWidget):
             self.yandex_hint,
         )
 
+    @Slot(str, str, str, str)
+    def _walk_image_failed(
+        self, product_id: str, marketplace: str, image_url: str, message: str,
+    ) -> None:
+        if not self._shutting_down:
+            self.log.append_error(product_id, image_url, f"{marketplace}: {message}")
+
     @Slot(str, str, str, int, int, str)
     def _walk_page_failed(
         self, product_id: str, marketplace: str, url: str, index: int, total: int, message: str,
@@ -682,6 +699,7 @@ class SitePage(QWidget):
         if thread is None:
             return
         self._walk_thread = None
+        self._saved_images = thread.saved_images.copy()
         if not self._shutting_down:
             if thread.error:
                 self.state_label.setText("Ошибка")
@@ -694,7 +712,9 @@ class SitePage(QWidget):
                     f"{ending}. Загружено: {thread.loaded}; ошибок: {thread.failed}; "
                     f"товаров Ozon: {sum(len(items) for items in self._ozon_results.values())}; "
                     f"товаров Wildberries: {sum(len(items) for items in self._wildberries_results.values())}; "
-                    f"товаров Яндекс Маркета: {sum(len(items) for items in self._yandex_results.values())}."
+                    f"товаров Яндекс Маркета: {sum(len(items) for items in self._yandex_results.values())}; "
+                    f"фото: {sum(len(items) for items in self._saved_images.values())}; "
+                    f"ошибок фото: {thread.image_failures}."
                 )
             self._update_links_controls()
         thread.deleteLater()

@@ -1,8 +1,10 @@
 """Parsed marketplace result tables and JSON handoff."""
 
+from pathlib import Path
 from unittest.mock import patch
 
 from web_parser.browser_access import PageSnapshot
+from web_parser.images import ImageBatch, ImageFailure, SavedImage
 from web_parser.product_links import ProductLinks
 from web_parser.ui import SITES
 
@@ -38,10 +40,30 @@ class ResultsTests(UiTestCase):
             def fetch_wildberries_json(_url):
                 return {"products": [{"id": 519585970}]}
 
-        with patch("web_parser.ui.workers.BrowserPageAccess", ResolvedAccess):
+        class PartialImageStore:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            @staticmethod
+            def save_products(_site, product_id, marketplace, products, _referer):
+                if marketplace == "Ozon":
+                    return ImageBatch((), (ImageFailure(1, products[0].image_url, "HTTP 403"),))
+                image = SavedImage(
+                    product_id, marketplace, 1, products[0].image_url,
+                    Path("artifacts/photo.jpg"), 100,
+                )
+                return ImageBatch((image,), ())
+
+        with (
+            patch("web_parser.ui.workers.BrowserPageAccess", ResolvedAccess),
+            patch("web_parser.ui.workers.ImageStore", PartialImageStore),
+        ):
             page.start_button.click()
             self._wait_for_walk(page)
         self.assertIn("Загружено: 3; ошибок: 0", page.run_status.text())
+        self.assertIn("фото: 2; ошибок фото: 1", page.run_status.text())
+        self.assertIn("Ozon: Фото №1: HTTP 403", page.log.editor.toPlainText())
+        self.assertEqual(len(page.saved_images[("42", "Wildberries")]), 1)
         self.assertEqual(page.ozon_table.rowCount(), 1)
         self.assertEqual(page.ozon_table.item(0, 1).text(), "Шнур Ozon")
         self.assertEqual(page.ozon_table.item(0, 2).text(), "1000.00")
