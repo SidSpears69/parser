@@ -159,6 +159,47 @@ class ImageStoreTests(unittest.TestCase):
         self.assertIn("ECONNREFUSED", failed.failed[0].reason)
         self.assertNotIn("secret", failed.failed[0].reason)
 
+    def test_wildberries_images_retry_directly_after_proxy_404_or_connection_error(self):
+        direct = Mock()
+        direct.get.side_effect = [
+            response(WB_IMAGE, WEBP, content_type="image/webp"),
+            response(WB_IMAGE, WEBP, content_type="image/webp"),
+        ]
+        self.request.get.side_effect = [
+            *[response(WB_IMAGE, b"", status=404) for _ in range(3)],
+            *[PlaywrightError("SOCKS5 proxy rejected the connection") for _ in range(3)],
+        ]
+        store = ImageStore(
+            lambda: self.request, self.root, sleep=lambda _seconds: None,
+            fallback_request_provider=lambda: direct,
+        )
+        batch = store.save_products(
+            "sail-master.ru", "1477", "Wildberries",
+            [Product(WB_IMAGE), Product(WB_IMAGE)],
+            "https://www.wildberries.ru/catalog/0/search.aspx?search=rope",
+        )
+        self.assertEqual(batch.failed, ())
+        self.assertEqual(len(batch.saved), 2)
+        self.assertEqual(self.request.get.call_count, 6)
+        self.assertEqual(direct.get.call_count, 2)
+        self.assertEqual(batch.saved[0].path.read_bytes(), WEBP)
+
+    def test_wildberries_image_reports_both_routes_if_direct_request_also_fails(self):
+        direct = Mock()
+        self.request.get.return_value = response(WB_IMAGE, b"", status=404)
+        direct.get.return_value = response(WB_IMAGE, b"", status=503)
+        store = ImageStore(
+            lambda: self.request, self.root, sleep=lambda _seconds: None,
+            fallback_request_provider=lambda: direct,
+        )
+        batch = store.save_products(
+            "sail-master.ru", "1477", "Wildberries", [Product(WB_IMAGE)],
+            "https://www.wildberries.ru/catalog/0/search.aspx?search=rope",
+        )
+        self.assertEqual(len(batch.failed), 1)
+        self.assertIn("Через прокси: Сервер фото вернул HTTP 404", batch.failed[0].reason)
+        self.assertIn("напрямую: Сервер фото вернул HTTP 503", batch.failed[0].reason)
+
     def test_rejects_redirect_to_other_host_and_oversized_photo(self):
         self.request.get.return_value = response("https://other.example/photo.jpg", JPEG)
         batch = self.store.save_products(

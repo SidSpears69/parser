@@ -7,10 +7,11 @@ from threading import Event
 from urllib.parse import quote, quote_plus
 
 from PySide6.QtCore import QThread, Signal
+from playwright.sync_api import APIRequestContext, Error as PlaywrightError
 
 from web_parser.browser_access import (
     BrowserAccessCancelled, BrowserAccessDenied, BrowserAccessError,
-    BrowserPageAccess, browser_profile_dir,
+    BrowserPageAccess, YandexCaptchaDenied, browser_profile_dir,
 )
 from web_parser.browser_discovery import BrowserInstallation
 from web_parser.images import ImageDownloadCancelled, ImageStore, SavedImage
@@ -26,13 +27,14 @@ class BrowserWalkThread(QThread):
     """Visit search pages and collect the first six marketplace products."""
 
     page_started = Signal(str, str, str, int, int)
-    page_loaded = Signal(str, str, int, int, int)
+    page_loaded = Signal(str, str, int, int, int, bool)
     page_failed = Signal(str, str, str, int, int, str)
     ozon_parsed = Signal(str, object)
     wildberries_parsed = Signal(str, object)
     yandex_parsed = Signal(str, object)
     image_failed = Signal(str, str, str, str)
     ozon_recovery_started = Signal(str)
+    yandex_direct_started = Signal(str)
 
     def __init__(
         self, site: str, installation: BrowserInstallation, links: tuple[ProductLinks, ...],
@@ -65,6 +67,25 @@ class BrowserWalkThread(QThread):
     def _pause(self, seconds: float) -> None:
         self._stop_event.wait(seconds)
 
+    def _temporary_access(
+        self, recovery: ExitStack, original: BrowserPageAccess, *,
+        prefix: str, marketplace: str, proxy: dict[str, str] | None,
+    ) -> BrowserPageAccess:
+        try:
+            folder = recovery.enter_context(
+                TemporaryDirectory(prefix=prefix, ignore_cleanup_errors=True)
+            )
+        except OSError as error:
+            raise BrowserAccessError(
+                f"Не удалось создать временный профиль {marketplace}."
+            ) from error
+        return recovery.enter_context(BrowserPageAccess(
+            self.installation, self.pause_seconds, headless=False,
+            sleep=self._pause, cancel_requested=self._stop_event.is_set,
+            profile_dir=Path(folder), proxy=proxy,
+            playwright=getattr(original, "playwright", None),
+        ))
+
     def run(self) -> None:
         total = len(self.links) * 3
         index = 0
@@ -78,13 +99,36 @@ class BrowserWalkThread(QThread):
                 proxy=getattr(access, "effective_proxy", self.proxy),
                 playwright=getattr(access, "playwright", None),
             ) as wildberries, ExitStack() as recovery:
+                direct_wb_request: APIRequestContext | None = None
+
+                def direct_wb_images_request() -> APIRequestContext:
+                    nonlocal direct_wb_request
+                    if direct_wb_request is None:
+                        new_request = access.playwright.request.new_context()
+                        direct_wb_request = new_request
+
+                        def close_direct_request() -> None:
+                            try:
+                                new_request.dispose()
+                            except PlaywrightError:
+                                pass
+
+                        recovery.callback(close_direct_request)
+                    return direct_wb_request
+
                 images = ImageStore(
                     lambda: access.page.request,
                     cancel_requested=self._stop_event.is_set,
                     sleep=self._pause,
+                    fallback_request_provider=(
+                        direct_wb_images_request if self.proxy is not None else None
+                    ),
                 )
                 ozon_access: BrowserPageAccess | None = None
                 ozon_images: ImageStore | None = None
+                yandex_direct_access: BrowserPageAccess | None = None
+                yandex_direct_images: ImageStore | None = None
+                yandex_direct_active = False
                 for product in self.links:
                     for marketplace, url in (
                         ("Ozon", product.ozon_url),
@@ -116,9 +160,42 @@ class BrowserWalkThread(QThread):
                                 parsed_products = parsed
                                 status = 200
                             else:
-                                marketplace_access = (ozon_access or access) if marketplace == "Ozon" else access
+                                if marketplace == "Ozon":
+                                    marketplace_access = ozon_access or access
+                                elif marketplace == "Яндекс Маркет" and yandex_direct_active:
+                                    marketplace_access = yandex_direct_access or access
+                                else:
+                                    marketplace_access = access
                                 try:
                                     snapshot = marketplace_access.fetch(url)
+                                except YandexCaptchaDenied as proxy_error:
+                                    if marketplace != "Яндекс Маркет" or self.proxy is None or yandex_direct_active:
+                                        raise
+                                    if self.stop_requested:
+                                        raise BrowserAccessCancelled(
+                                            "Обход страниц остановлен пользователем."
+                                        ) from proxy_error
+                                    self.yandex_direct_started.emit(product.product_id)
+                                    if yandex_direct_access is None:
+                                        yandex_direct_access = self._temporary_access(
+                                            recovery, access, prefix="web-parser-yandex-direct-",
+                                            marketplace="Яндекс Маркета", proxy=None,
+                                        )
+                                        yandex_direct_images = ImageStore(
+                                            lambda: yandex_direct_access.page.request,
+                                            cancel_requested=self._stop_event.is_set,
+                                            sleep=self._pause,
+                                        )
+                                    marketplace_access = yandex_direct_access
+                                    try:
+                                        snapshot = marketplace_access.fetch(url)
+                                    except BrowserAccessCancelled:
+                                        raise
+                                    except BrowserAccessError as direct_error:
+                                        raise BrowserAccessError(
+                                            f"Через прокси: {proxy_error}; напрямую: {direct_error}"
+                                        ) from direct_error
+                                    yandex_direct_active = True
                                 except BrowserAccessDenied as error:
                                     if marketplace != "Ozon" or error.status != 403 or ozon_access is not None:
                                         raise
@@ -127,20 +204,10 @@ class BrowserWalkThread(QThread):
                                             "Обход страниц остановлен пользователем."
                                         ) from error
                                     self.ozon_recovery_started.emit(product.product_id)
-                                    try:
-                                        fresh_profile = recovery.enter_context(
-                                            TemporaryDirectory(prefix="web-parser-ozon-", ignore_cleanup_errors=True)
-                                        )
-                                    except OSError as profile_error:
-                                        raise BrowserAccessError(
-                                            "Не удалось создать временный профиль Ozon."
-                                        ) from profile_error
-                                    fresh_access = recovery.enter_context(BrowserPageAccess(
-                                        self.installation, self.pause_seconds, headless=False,
-                                        sleep=self._pause, cancel_requested=self._stop_event.is_set,
-                                        profile_dir=Path(fresh_profile), proxy=self.proxy,
-                                        playwright=getattr(access, "playwright", None),
-                                    ))
+                                    fresh_access = self._temporary_access(
+                                        recovery, access, prefix="web-parser-ozon-",
+                                        marketplace="Ozon", proxy=self.proxy,
+                                    )
                                     ozon_access = fresh_access
                                     ozon_images = ImageStore(
                                         lambda: fresh_access.page.request,
@@ -156,11 +223,16 @@ class BrowserWalkThread(QThread):
                                     self.ozon_parsed.emit(product.product_id, parsed_ozon)
                                     parsed_products = parsed_ozon
                                 else:
-                                    parsed_yandex = parse_yandex_search(access)
+                                    parsed_yandex = parse_yandex_search(marketplace_access)
                                     self.yandex_results[product.product_id] = parsed_yandex
                                     self.yandex_parsed.emit(product.product_id, parsed_yandex)
                                     parsed_products = parsed_yandex
-                            image_store = ozon_images if marketplace == "Ozon" and ozon_images is not None else images
+                            image_store = (
+                                ozon_images if marketplace == "Ozon" and ozon_images is not None else
+                                yandex_direct_images
+                                if marketplace == "Яндекс Маркет" and yandex_direct_images is not None
+                                else images
+                            )
                             batch = image_store.save_products(
                                 self.site, product.product_id, marketplace, parsed_products, url,
                             )
@@ -185,6 +257,7 @@ class BrowserWalkThread(QThread):
                             self.loaded += 1
                             self.page_loaded.emit(
                                 product.product_id, marketplace, index, total, status,
+                                marketplace == "Яндекс Маркет" and yandex_direct_active,
                             )
         except (BrowserAccessError, OzonError, WildberriesError, YandexMarketError) as error:
             if self.stop_requested:

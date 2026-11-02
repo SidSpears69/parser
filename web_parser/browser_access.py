@@ -82,6 +82,10 @@ class BrowserAccessDenied(BrowserAccessError):
         super().__init__(f"HTTP {status}: {reason or 'страница не прошла проверку доступа.'}")
 
 
+class YandexCaptchaDenied(BrowserAccessDenied):
+    """Yandex Market still shows a captcha after all browser attempts."""
+
+
 class _YandexCaptchaDetected(BrowserAccessDenied):
     """A Yandex captcha that may disappear on the next navigation attempt."""
 
@@ -515,7 +519,7 @@ class BrowserPageAccess:
             except _YandexCaptchaDetected as error:
                 if attempt < self.attempts:
                     continue
-                raise BrowserAccessDenied(
+                raise YandexCaptchaDenied(
                     error.status,
                     f"обнаружена капча Яндекс Маркета; попыток: {self.attempts}; "
                     "страница недоступна.",

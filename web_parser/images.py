@@ -44,6 +44,10 @@ class ImageDownloadCancelled(ImageDownloadError):
     """The user stopped the browser walk during photo processing."""
 
 
+class _ImageRequestFailed(ImageDownloadError):
+    """The photo request exhausted its HTTP and network attempts."""
+
+
 class ProductWithImage(Protocol):
     image_url: str
 
@@ -119,8 +123,10 @@ class ImageStore:
         root: Path = DEFAULT_IMAGE_ROOT, *,
         cancel_requested: Callable[[], bool] = lambda: False,
         sleep: Callable[[float], None] = time.sleep,
+        fallback_request_provider: Callable[[], APIRequestContext] | None = None,
     ) -> None:
         self._request_provider = request_provider
+        self._fallback_request_provider = fallback_request_provider
         self.root = Path(root)
         self._cancel_requested = cancel_requested
         self._sleep = sleep
@@ -131,12 +137,32 @@ class ImageStore:
 
     def _download(self, url: str, marketplace: str, referer: str) -> tuple[bytes, str]:
         _check_image_url(url, marketplace)
+        try:
+            return self._download_from(self._request_provider, url, marketplace, referer)
+        except _ImageRequestFailed as proxy_error:
+            if marketplace != "Wildberries" or self._fallback_request_provider is None:
+                raise
+            try:
+                return self._download_from(
+                    self._fallback_request_provider, url, marketplace, referer,
+                )
+            except ImageDownloadCancelled:
+                raise
+            except ImageDownloadError as direct_error:
+                raise ImageDownloadError(
+                    f"Через прокси: {proxy_error}; напрямую: {direct_error}"
+                ) from direct_error
+
+    def _download_from(
+        self, request_provider: Callable[[], APIRequestContext],
+        url: str, marketplace: str, referer: str,
+    ) -> tuple[bytes, str]:
         last_problem = "Не удалось загрузить фото."
         for attempt in range(_ATTEMPTS):
             self._check_cancelled()
             response = None
             try:
-                response = self._request_provider().get(
+                response = request_provider().get(
                     url, headers={"Accept": "image/*", "Referer": quote(referer, safe=_REFERER_SAFE)},
                     timeout=_REQUEST_TIMEOUT_MS, max_redirects=3,
                 )
@@ -173,7 +199,7 @@ class ImageStore:
                         pass
             if attempt + 1 < _ATTEMPTS:
                 self._sleep(1)
-        raise ImageDownloadError(last_problem)
+        raise _ImageRequestFailed(last_problem)
 
     @staticmethod
     def _save(path: Path, payload: bytes) -> None:

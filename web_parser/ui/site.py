@@ -595,6 +595,7 @@ class SitePage(QWidget):
         thread.yandex_parsed.connect(self._walk_yandex_parsed)
         thread.image_failed.connect(self._walk_image_failed)
         thread.ozon_recovery_started.connect(self._walk_ozon_recovery_started)
+        thread.yandex_direct_started.connect(self._walk_yandex_direct_started)
         thread.finished.connect(self._walk_finished)
         thread.start()
         self._update_links_controls()
@@ -623,9 +624,10 @@ class SitePage(QWidget):
         if row < self.links_preview.rowCount():
             self.links_preview.setCurrentCell(row, (index - 1) % 3 + 1)
 
-    @Slot(str, str, int, int, int)
+    @Slot(str, str, int, int, int, bool)
     def _walk_page_loaded(
         self, product_id: str, marketplace: str, index: int, total: int, status: int,
+        direct: bool,
     ) -> None:
         if not self._shutting_down:
             detail = (
@@ -635,7 +637,8 @@ class SitePage(QWidget):
                 + ("страница открылась после проверки браузера (первичный HTTP 403)"
                    if status == 403 else f"HTTP {status}")
                 if marketplace == "Ozon" else
-                f"карточек: {len(self._yandex_results.get(product_id, ()))}; HTTP {status}"
+                f"карточек: {len(self._yandex_results.get(product_id, ()))}; "
+                f"HTTP {status}{', без прокси' if direct else ''}"
             )
             self.run_status.setText(f"Загружено {index}/{total}: {marketplace}, товар {product_id}, {detail}.")
 
@@ -644,6 +647,14 @@ class SitePage(QWidget):
         if not self._shutting_down:
             self.run_status.setText(
                 f"Ozon показал капчу для товара {product_id}; повторная попытка в новом профиле браузера…"
+            )
+
+    @Slot(str)
+    def _walk_yandex_direct_started(self, product_id: str) -> None:
+        if not self._shutting_down:
+            self.run_status.setText(
+                f"Яндекс Маркет показал капчу для товара {product_id}; "
+                "повторная попытка без прокси…"
             )
 
     def _show_parsed_products(

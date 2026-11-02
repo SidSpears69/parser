@@ -11,7 +11,7 @@ from playwright.sync_api import Error as PlaywrightError, TimeoutError as Playwr
 
 from web_parser.browser_access import (
     BrowserAccessCancelled, BrowserAccessDenied, BrowserAccessError,
-    BrowserPageAccess, browser_profile_dir,
+    BrowserPageAccess, YandexCaptchaDenied, browser_profile_dir,
 )
 from web_parser.browser_discovery import BrowserInstallation
 from web_parser.config import BROWSERS
@@ -398,7 +398,7 @@ class BrowserAccessTests(unittest.TestCase):
         self.page.url = YANDEX_URL
         self.page.evaluate.return_value = True
         with self.access() as access:
-            with self.assertRaisesRegex(BrowserAccessDenied, "HTTP 200: обнаружена капча.*попыток: 3"):
+            with self.assertRaisesRegex(YandexCaptchaDenied, "HTTP 200: обнаружена капча.*попыток: 3"):
                 access.fetch(YANDEX_URL)
         self.assertEqual(self.page.goto.call_count, 3)
         self.page.content.assert_not_called()
