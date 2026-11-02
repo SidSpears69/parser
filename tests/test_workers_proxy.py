@@ -4,7 +4,7 @@ from pathlib import Path
 import unittest
 from unittest.mock import patch
 
-from web_parser.browser_access import BrowserAccessError, PageSnapshot
+from web_parser.browser_access import BrowserAccessDenied, BrowserAccessError, PageSnapshot, browser_profile_dir
 from web_parser.browser_discovery import BrowserInstallation
 from web_parser.ozon import OzonError
 from web_parser.product_links import ProductLinks
@@ -12,6 +12,76 @@ from web_parser.ui.workers import BrowserWalkThread
 
 
 class WorkerProxyTests(unittest.TestCase):
+    def test_ozon_captcha_retries_in_fresh_profile_and_keeps_other_sites_on_saved_profile(self):
+        links = tuple(ProductLinks(
+            str(index), f"https://www.ozon.ru/search/?text={index}",
+            f"https://www.wildberries.ru/search/{index}",
+            f"https://market.yandex.ru/search?text={index}",
+        ) for index in (1, 2))
+        profiles = []
+        visited = []
+
+        class FakeAccess:
+            def __init__(self, *_args, profile_dir, **_options):
+                self.profile_dir = profile_dir
+                self.fresh = profile_dir.name.startswith("web-parser-ozon-")
+                profiles.append(profile_dir)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                pass
+
+            def fetch(self, url):
+                visited.append((self.fresh, url))
+                if "ozon.ru" in url and not self.fresh:
+                    raise BrowserAccessDenied(403, "капча Ozon")
+                return PageSnapshot(url, url, 200, "<html>ok</html>", 1)
+
+            def fetch_wildberries_json(self, url):
+                visited.append((self.fresh, url))
+                return {"products": []}
+
+        class FakeWildberriesClient:
+            def __init__(self, **_options):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                pass
+
+            @staticmethod
+            def parse_document(_document):
+                return ()
+
+        worker = BrowserWalkThread(
+            "sail-master.ru", BrowserInstallation("Google Chrome", Path(__file__)), links, 0,
+        )
+        recoveries = []
+        worker.ozon_recovery_started.connect(recoveries.append)
+        with (
+            patch("web_parser.ui.workers.BrowserPageAccess", FakeAccess),
+            patch("web_parser.ui.workers.WildberriesClient", FakeWildberriesClient),
+            patch("web_parser.ui.workers.parse_ozon_search", return_value=()),
+            patch("web_parser.ui.workers.parse_yandex_search", return_value=()),
+        ):
+            worker.run()
+
+        self.assertEqual(worker.loaded, 6)
+        self.assertEqual(worker.failed, 0)
+        self.assertEqual(recoveries, ["1"])
+        self.assertEqual(len(profiles), 2)
+        self.assertEqual(profiles[0], browser_profile_dir("sail-master.ru", "Google Chrome"))
+        self.assertFalse(profiles[1].exists())
+        self.assertEqual(
+            [fresh for fresh, url in visited if "ozon.ru" in url],
+            [False, True, True],
+        )
+        self.assertTrue(all(not fresh for fresh, url in visited if "ozon.ru" not in url))
+
     def test_ozon_parse_error_is_logged_and_next_link_is_visited(self):
         links = tuple(ProductLinks(
             str(index), f"https://ozon.example/{index}",

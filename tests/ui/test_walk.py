@@ -82,10 +82,13 @@ class WalkTests(UiTestCase):
         ):
             page.start_button.click()
             self._wait_for_walk(page)
-        self.assertEqual(visited, [
+        expected_visits = [
             links[0].ozon_url, links[0].wildberries_url, links[0].yandex_market_url,
             links[1].ozon_url, links[1].wildberries_url, links[1].yandex_market_url,
-        ])
+        ]
+        if url_field == "ozon_url" and denial.status == 403:
+            expected_visits.insert(1, links[0].ozon_url)
+        self.assertEqual(visited, expected_visits)
         self.assertIn("Загружено: 4; ошибок: 2", page.run_status.text())
         self.assertEqual(page.log.editor.document().blockCount(), 2)
         log = page.log.editor.toPlainText()

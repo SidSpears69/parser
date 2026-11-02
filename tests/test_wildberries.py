@@ -6,6 +6,8 @@ import unittest
 from urllib.parse import parse_qs, urlsplit
 from unittest.mock import Mock, patch
 
+from playwright.sync_api import Error as PlaywrightError
+
 from web_parser.wildberries import (
     WildberriesClient, WildberriesError, parse_search_json, search_api_url,
 )
@@ -116,6 +118,33 @@ class WildberriesParserTests(unittest.TestCase):
             with WildberriesClient() as client:
                 with self.assertRaisesRegex(WildberriesError, "HTTP 403"):
                     client.fetch("https://www.wildberries.ru/catalog/0/search.aspx?search=rope")
+
+    def test_routes_retry_transient_proxy_error(self):
+        request = Mock()
+        request.get.side_effect = [
+            PlaywrightError("connect ECONNREFUSED 127.0.0.1:12345"),
+            PlaywrightError("connect ECONNREFUSED 127.0.0.1:12345"),
+            Mock(ok=True, body=Mock(return_value=json.dumps(ROUTES).encode())),
+        ]
+        playwright = Mock()
+        playwright.request.new_context.return_value = request
+        with patch("web_parser.wildberries.time.sleep") as sleep:
+            with WildberriesClient(playwright=playwright) as client:
+                self.assertEqual(client.parse_document({"products": [product(0)]})[0].wb_id, 519585970)
+        self.assertEqual(request.get.call_count, 3)
+        self.assertEqual(sleep.call_count, 2)
+
+    def test_request_error_reports_code_without_credentials(self):
+        request = Mock()
+        request.get.side_effect = PlaywrightError("connect ECONNREFUSED; password=secret")
+        playwright = Mock()
+        playwright.request.new_context.return_value = request
+        with patch("web_parser.wildberries.time.sleep"):
+            with WildberriesClient(playwright=playwright) as client:
+                with self.assertRaises(WildberriesError) as caught:
+                    client.parse_document({"products": [product(0)]})
+        self.assertIn("ECONNREFUSED", str(caught.exception))
+        self.assertNotIn("secret", str(caught.exception))
 
     def test_existing_playwright_session_is_reused_without_stopping_it(self):
         playwright = Mock()

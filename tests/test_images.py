@@ -6,6 +6,8 @@ import tempfile
 import unittest
 from unittest.mock import Mock
 
+from playwright.sync_api import Error as PlaywrightError
+
 from web_parser.images import ImageDownloadCancelled, ImageStore
 
 
@@ -110,6 +112,52 @@ class ImageStoreTests(unittest.TestCase):
         )
         self.assertEqual(self.request.get.call_count, 2)
         self.assertEqual(len(batch.saved), 1)
+
+    def test_retries_wildberries_photo_404_but_not_ozon_404(self):
+        self.request.get.side_effect = [
+            response(WB_IMAGE, b"", status=404),
+            response(WB_IMAGE, WEBP, content_type="image/webp"),
+        ]
+        batch = self.store.save_products(
+            "sail-master.ru", "1481", "Wildberries", [Product(WB_IMAGE)],
+            "https://www.wildberries.ru/catalog/0/search.aspx?search=rope",
+        )
+        self.assertEqual(len(batch.saved), 1)
+        self.assertEqual(self.request.get.call_count, 2)
+
+        self.request.get.reset_mock()
+        self.request.get.side_effect = None
+        self.request.get.return_value = response(OZON_IMAGE, b"", status=404)
+        batch = self.store.save_products(
+            "sail-master.ru", "1481", "Ozon", [Product(OZON_IMAGE)],
+            "https://www.ozon.ru/search/?text=rope",
+        )
+        self.assertEqual(len(batch.failed), 1)
+        self.assertEqual(self.request.get.call_count, 1)
+
+    def test_retries_proxy_connection_errors_and_logs_safe_error_code(self):
+        self.request.get.side_effect = [
+            PlaywrightError("connect ECONNREFUSED 127.0.0.1:12345"),
+            PlaywrightError("connect ECONNREFUSED 127.0.0.1:12345"),
+            response(WB_IMAGE, WEBP, content_type="image/webp"),
+        ]
+        batch = self.store.save_products(
+            "sail-master.ru", "1473", "Wildberries", [Product(WB_IMAGE)],
+            "https://www.wildberries.ru/catalog/0/search.aspx?search=rope",
+        )
+        self.assertEqual(len(batch.saved), 1)
+        self.assertEqual(self.request.get.call_count, 3)
+
+        self.request.get.reset_mock()
+        self.request.get.side_effect = PlaywrightError(
+            "connect ECONNREFUSED 127.0.0.1:12345; password=secret",
+        )
+        failed = self.store.save_products(
+            "sail-master.ru", "1473", "Wildberries", [Product(WB_IMAGE)],
+            "https://www.wildberries.ru/catalog/0/search.aspx?search=rope",
+        )
+        self.assertIn("ECONNREFUSED", failed.failed[0].reason)
+        self.assertNotIn("secret", failed.failed[0].reason)
 
     def test_rejects_redirect_to_other_host_and_oversized_photo(self):
         self.request.get.return_value = response("https://other.example/photo.jpg", JPEG)

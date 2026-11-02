@@ -1,5 +1,8 @@
 """Background workers for browser walks and source JSON downloads."""
 
+from contextlib import ExitStack
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from threading import Event
 from urllib.parse import quote, quote_plus
 
@@ -29,6 +32,7 @@ class BrowserWalkThread(QThread):
     wildberries_parsed = Signal(str, object)
     yandex_parsed = Signal(str, object)
     image_failed = Signal(str, str, str, str)
+    ozon_recovery_started = Signal(str)
 
     def __init__(
         self, site: str, installation: BrowserInstallation, links: tuple[ProductLinks, ...],
@@ -73,12 +77,14 @@ class BrowserWalkThread(QThread):
             ) as access, WildberriesClient(
                 proxy=getattr(access, "effective_proxy", self.proxy),
                 playwright=getattr(access, "playwright", None),
-            ) as wildberries:
+            ) as wildberries, ExitStack() as recovery:
                 images = ImageStore(
                     lambda: access.page.request,
                     cancel_requested=self._stop_event.is_set,
                     sleep=self._pause,
                 )
+                ozon_access: BrowserPageAccess | None = None
+                ozon_images: ImageStore | None = None
                 for product in self.links:
                     for marketplace, url in (
                         ("Ozon", product.ozon_url),
@@ -110,10 +116,42 @@ class BrowserWalkThread(QThread):
                                 parsed_products = parsed
                                 status = 200
                             else:
-                                snapshot = access.fetch(url)
+                                marketplace_access = (ozon_access or access) if marketplace == "Ozon" else access
+                                try:
+                                    snapshot = marketplace_access.fetch(url)
+                                except BrowserAccessDenied as error:
+                                    if marketplace != "Ozon" or error.status != 403 or ozon_access is not None:
+                                        raise
+                                    if self.stop_requested:
+                                        raise BrowserAccessCancelled(
+                                            "Обход страниц остановлен пользователем."
+                                        ) from error
+                                    self.ozon_recovery_started.emit(product.product_id)
+                                    try:
+                                        fresh_profile = recovery.enter_context(
+                                            TemporaryDirectory(prefix="web-parser-ozon-", ignore_cleanup_errors=True)
+                                        )
+                                    except OSError as profile_error:
+                                        raise BrowserAccessError(
+                                            "Не удалось создать временный профиль Ozon."
+                                        ) from profile_error
+                                    fresh_access = recovery.enter_context(BrowserPageAccess(
+                                        self.installation, self.pause_seconds, headless=False,
+                                        sleep=self._pause, cancel_requested=self._stop_event.is_set,
+                                        profile_dir=Path(fresh_profile), proxy=self.proxy,
+                                        playwright=getattr(access, "playwright", None),
+                                    ))
+                                    ozon_access = fresh_access
+                                    ozon_images = ImageStore(
+                                        lambda: fresh_access.page.request,
+                                        cancel_requested=self._stop_event.is_set,
+                                        sleep=self._pause,
+                                    )
+                                    marketplace_access = fresh_access
+                                    snapshot = marketplace_access.fetch(url)
                                 status = snapshot.status
                                 if marketplace == "Ozon":
-                                    parsed_ozon = parse_ozon_search(access)
+                                    parsed_ozon = parse_ozon_search(marketplace_access)
                                     self.ozon_results[product.product_id] = parsed_ozon
                                     self.ozon_parsed.emit(product.product_id, parsed_ozon)
                                     parsed_products = parsed_ozon
@@ -122,7 +160,8 @@ class BrowserWalkThread(QThread):
                                     self.yandex_results[product.product_id] = parsed_yandex
                                     self.yandex_parsed.emit(product.product_id, parsed_yandex)
                                     parsed_products = parsed_yandex
-                            batch = images.save_products(
+                            image_store = ozon_images if marketplace == "Ozon" and ozon_images is not None else images
+                            batch = image_store.save_products(
                                 self.site, product.product_id, marketplace, parsed_products, url,
                             )
                             self.saved_images[(product.product_id, marketplace)] = batch.saved

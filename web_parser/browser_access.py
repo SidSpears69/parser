@@ -240,6 +240,7 @@ class BrowserPageAccess:
         cancel_requested: Callable[[], bool] = lambda: False,
         profile_dir: Path | None = None,
         proxy: dict[str, str] | None = None,
+        playwright: Playwright | None = None,
     ) -> None:
         if not 0 <= pause_seconds <= 3600:
             raise ValueError("Пауза должна быть от 0 до 3600 секунд.")
@@ -253,6 +254,8 @@ class BrowserPageAccess:
         self._cancel_requested = cancel_requested
         self.profile_dir = Path(profile_dir) if profile_dir is not None else None
         self.proxy = proxy.copy() if proxy is not None else None
+        self._provided_playwright = playwright
+        self._owns_playwright = playwright is None
         self._playwright: Playwright | None = None
         self._browser: Browser | None = None
         self._context: BrowserContext | None = None
@@ -296,7 +299,10 @@ class BrowserPageAccess:
                 raise BrowserAccessError(f"Исполняемый файл браузера не найден: {binary}")
 
         try:
-            self._playwright = sync_playwright().start()
+            self._playwright = (
+                sync_playwright().start() if self._provided_playwright is None
+                else self._provided_playwright
+            )
             proxy_options = self._browser_proxy_options()
             if name == "Mozilla Firefox":
                 firefox = self._playwright.firefox
@@ -481,7 +487,12 @@ class BrowserPageAccess:
                         )
                 except PlaywrightTimeoutError:
                     _raise_if_yandex_captcha(page, url, response.status)
-                    if ozon_challenge or wildberries_challenge:
+                    if ozon_challenge:
+                        raise BrowserAccessDenied(
+                            response.status,
+                            "капча или проверка браузера Ozon не пройдена; страница недоступна.",
+                        ) from None
+                    if wildberries_challenge:
                         raise BrowserAccessDenied(response.status) from None
                     last_problem = (
                         "результаты Яндекс Маркета не появились"
@@ -632,7 +643,8 @@ class BrowserPageAccess:
         """Release resources in reverse order, including after partial startup."""
         context, self._context = self._context, None
         browser, self._browser = self._browser, None
-        playwright, self._playwright = self._playwright, None
+        playwright = self._playwright if self._owns_playwright else None
+        self._playwright = None
         proxy_relay, self._proxy_relay = self._proxy_relay, None
         self._page = None
         self._navigated_once = False

@@ -16,12 +16,13 @@ from urllib.parse import quote, urlsplit
 from playwright.sync_api import APIRequestContext, Error as PlaywrightError
 
 from web_parser.config import SITES
+from web_parser.network_errors import request_failure_reason
 
 
 DEFAULT_IMAGE_ROOT = Path(__file__).resolve().parent.parent / "artifacts"
 _MAX_IMAGE_BYTES = 30 * 1024 * 1024
 _REQUEST_TIMEOUT_MS = 20_000
-_ATTEMPTS = 2
+_ATTEMPTS = 3
 _REFERER_SAFE = ":/?#[]@!$&'()*+,;=%-._~"
 _MARKETPLACES = {
     "Ozon": "ozon",
@@ -142,7 +143,12 @@ class ImageStore:
                 _check_image_url(response.url, marketplace)
                 if not response.ok:
                     last_problem = f"Сервер фото вернул HTTP {response.status}."
-                    if response.status not in (408, 429) and response.status < 500:
+                    retryable = (
+                        response.status in (408, 429)
+                        or response.status >= 500
+                        or (marketplace == "Wildberries" and response.status == 404)
+                    )
+                    if not retryable:
                         break
                 else:
                     content_type = response.headers.get("content-type", "").split(";", 1)[0].lower()
@@ -157,8 +163,8 @@ class ImageStore:
                     if len(payload) > _MAX_IMAGE_BYTES:
                         raise ImageDownloadError("Фото превышает допустимый размер 30 МБ.")
                     return payload, _image_extension(payload)
-            except PlaywrightError:
-                last_problem = "Не удалось загрузить фото по сети."
+            except PlaywrightError as error:
+                last_problem = f"Не удалось загрузить фото по сети: {request_failure_reason(error)}."
             finally:
                 if response is not None:
                     try:

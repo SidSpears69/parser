@@ -5,10 +5,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import Decimal
 import json
+import time
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 from playwright.sync_api import APIRequestContext, Error as PlaywrightError
 from playwright.sync_api import Playwright, sync_playwright
+
+from web_parser.network_errors import request_failure_reason
 
 
 _SEARCH_ENDPOINT = "https://www.wildberries.ru/__internal/u-search/exactmatch/ru/common/v18/search"
@@ -17,6 +20,7 @@ _DEFAULT_DEST = "1259570991"
 _TIMEOUT_MS = 30_000
 _MAX_JSON_BYTES = 10 * 1024 * 1024
 _RESULT_LIMIT = 6
+_REQUEST_ATTEMPTS = 3
 
 
 class WildberriesError(RuntimeError):
@@ -33,9 +37,9 @@ class WildberriesHTTPError(WildberriesError):
 class WildberriesRequestError(WildberriesError):
     """The HTTP transport failed before yielding a usable status and body."""
 
-    def __init__(self, label: str) -> None:
+    def __init__(self, label: str, reason: str) -> None:
         self.label = label
-        super().__init__(f"{label}: не удалось получить ответ.")
+        super().__init__(f"{label}: не удалось получить ответ; {reason}.")
 
 
 @dataclass(frozen=True, slots=True)
@@ -243,13 +247,22 @@ class WildberriesClient:
     def _json(self, url: str, label: str) -> object:
         if self._request is None:
             raise WildberriesError("HTTP-клиент Wildberries не открыт.")
-        try:
-            response = self._request.get(url, timeout=_TIMEOUT_MS)
-            if not response.ok:
-                raise WildberriesHTTPError(label, response.status)
-            body = response.body()
-        except PlaywrightError as error:
-            raise WildberriesRequestError(label) from error
+        body = b""
+        for attempt in range(1, _REQUEST_ATTEMPTS + 1):
+            try:
+                response = self._request.get(url, timeout=_TIMEOUT_MS)
+                if not response.ok:
+                    if response.status in (408, 429) or response.status >= 500:
+                        if attempt < _REQUEST_ATTEMPTS:
+                            time.sleep(1)
+                            continue
+                    raise WildberriesHTTPError(label, response.status)
+                body = response.body()
+                break
+            except PlaywrightError as error:
+                if attempt == _REQUEST_ATTEMPTS:
+                    raise WildberriesRequestError(label, request_failure_reason(error)) from error
+                time.sleep(1)
         if len(body) > _MAX_JSON_BYTES:
             raise WildberriesError(f"{label}: ответ JSON слишком велик.")
         try:

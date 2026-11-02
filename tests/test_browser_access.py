@@ -66,6 +66,14 @@ class BrowserAccessTests(unittest.TestCase):
         self.browser.close.assert_called_once_with()
         self.playwright.stop.assert_called_once_with()
 
+    def test_second_browser_session_reuses_playwright_without_stopping_the_owner(self):
+        with BrowserPageAccess(CHROME, 2, playwright=self.playwright) as access:
+            self.assertIs(access.playwright, self.playwright)
+        self.start_playwright.assert_not_called()
+        self.context.close.assert_called_once_with()
+        self.browser.close.assert_called_once_with()
+        self.playwright.stop.assert_not_called()
+
     def test_authenticated_proxy_is_passed_to_chromium_launch(self):
         proxy = {
             "server": "http://ru-proxy.example:8080",
@@ -233,6 +241,7 @@ class BrowserAccessTests(unittest.TestCase):
             with self.assertRaises(BrowserAccessDenied) as caught:
                 access.fetch(OZON_URL)
         self.assertEqual(caught.exception.status, 403)
+        self.assertIn("капча или проверка браузера Ozon", str(caught.exception))
         self.page.goto.assert_called_once()
 
     def test_wildberries_498_can_resolve_to_a_usable_page(self):

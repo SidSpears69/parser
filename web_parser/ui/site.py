@@ -594,6 +594,7 @@ class SitePage(QWidget):
         thread.wildberries_parsed.connect(self._walk_wildberries_parsed)
         thread.yandex_parsed.connect(self._walk_yandex_parsed)
         thread.image_failed.connect(self._walk_image_failed)
+        thread.ozon_recovery_started.connect(self._walk_ozon_recovery_started)
         thread.finished.connect(self._walk_finished)
         thread.start()
         self._update_links_controls()
@@ -637,6 +638,13 @@ class SitePage(QWidget):
                 f"карточек: {len(self._yandex_results.get(product_id, ()))}; HTTP {status}"
             )
             self.run_status.setText(f"Загружено {index}/{total}: {marketplace}, товар {product_id}, {detail}.")
+
+    @Slot(str)
+    def _walk_ozon_recovery_started(self, product_id: str) -> None:
+        if not self._shutting_down:
+            self.run_status.setText(
+                f"Ozon показал капчу для товара {product_id}; повторная попытка в новом профиле браузера…"
+            )
 
     def _show_parsed_products(
         self, product_id: str, products: tuple[_Product, ...],
