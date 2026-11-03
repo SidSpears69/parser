@@ -11,7 +11,7 @@ from playwright.sync_api import APIRequestContext, Error as PlaywrightError
 
 from web_parser.browser_access import (
     BrowserAccessCancelled, BrowserAccessDenied, BrowserAccessError,
-    BrowserPageAccess, YandexCaptchaDenied, browser_profile_dir,
+    BrowserFetchFailed, BrowserPageAccess, YandexCaptchaDenied, browser_profile_dir,
 )
 from web_parser.browser_discovery import BrowserInstallation
 from web_parser.images import ImageDownloadCancelled, ImageStore, SavedImage
@@ -34,6 +34,7 @@ class BrowserWalkThread(QThread):
     yandex_parsed = Signal(str, object)
     image_failed = Signal(str, str, str, str)
     ozon_recovery_started = Signal(str)
+    ozon_direct_started = Signal(str)
     yandex_direct_started = Signal(str)
 
     def __init__(
@@ -99,13 +100,13 @@ class BrowserWalkThread(QThread):
                 proxy=getattr(access, "effective_proxy", self.proxy),
                 playwright=getattr(access, "playwright", None),
             ) as wildberries, ExitStack() as recovery:
-                direct_wb_request: APIRequestContext | None = None
+                direct_image_request: APIRequestContext | None = None
 
-                def direct_wb_images_request() -> APIRequestContext:
-                    nonlocal direct_wb_request
-                    if direct_wb_request is None:
+                def direct_images_request() -> APIRequestContext:
+                    nonlocal direct_image_request
+                    if direct_image_request is None:
                         new_request = access.playwright.request.new_context()
-                        direct_wb_request = new_request
+                        direct_image_request = new_request
 
                         def close_direct_request() -> None:
                             try:
@@ -114,18 +115,21 @@ class BrowserWalkThread(QThread):
                                 pass
 
                         recovery.callback(close_direct_request)
-                    return direct_wb_request
+                    return direct_image_request
 
                 images = ImageStore(
                     lambda: access.page.request,
                     cancel_requested=self._stop_event.is_set,
                     sleep=self._pause,
                     fallback_request_provider=(
-                        direct_wb_images_request if self.proxy is not None else None
+                        direct_images_request if self.proxy is not None else None
                     ),
                 )
                 ozon_access: BrowserPageAccess | None = None
                 ozon_images: ImageStore | None = None
+                ozon_direct_access: BrowserPageAccess | None = None
+                ozon_direct_images: ImageStore | None = None
+                ozon_direct_active = False
                 yandex_direct_access: BrowserPageAccess | None = None
                 yandex_direct_images: ImageStore | None = None
                 yandex_direct_active = False
@@ -168,7 +172,7 @@ class BrowserWalkThread(QThread):
                                     marketplace_access = access
                                 try:
                                     snapshot = marketplace_access.fetch(url)
-                                except YandexCaptchaDenied as proxy_error:
+                                except (YandexCaptchaDenied, BrowserFetchFailed) as proxy_error:
                                     if marketplace != "Яндекс Маркет" or self.proxy is None or yandex_direct_active:
                                         raise
                                     if self.stop_requested:
@@ -185,6 +189,9 @@ class BrowserWalkThread(QThread):
                                             lambda: yandex_direct_access.page.request,
                                             cancel_requested=self._stop_event.is_set,
                                             sleep=self._pause,
+                                            fallback_request_provider=lambda: access.page.request,
+                                            primary_route_label="Напрямую",
+                                            fallback_route_label="через прокси",
                                         )
                                     marketplace_access = yandex_direct_access
                                     try:
@@ -197,25 +204,67 @@ class BrowserWalkThread(QThread):
                                         ) from direct_error
                                     yandex_direct_active = True
                                 except BrowserAccessDenied as error:
-                                    if marketplace != "Ozon" or error.status != 403 or ozon_access is not None:
+                                    if marketplace != "Ozon" or error.status != 403:
                                         raise
                                     if self.stop_requested:
                                         raise BrowserAccessCancelled(
                                             "Обход страниц остановлен пользователем."
                                         ) from error
-                                    self.ozon_recovery_started.emit(product.product_id)
-                                    fresh_access = self._temporary_access(
-                                        recovery, access, prefix="web-parser-ozon-",
-                                        marketplace="Ozon", proxy=self.proxy,
-                                    )
-                                    ozon_access = fresh_access
-                                    ozon_images = ImageStore(
-                                        lambda: fresh_access.page.request,
-                                        cancel_requested=self._stop_event.is_set,
-                                        sleep=self._pause,
-                                    )
-                                    marketplace_access = fresh_access
-                                    snapshot = marketplace_access.fetch(url)
+                                    fresh_succeeded = False
+                                    if ozon_access is None:
+                                        self.ozon_recovery_started.emit(product.product_id)
+                                        fresh_access = self._temporary_access(
+                                            recovery, access, prefix="web-parser-ozon-",
+                                            marketplace="Ozon", proxy=self.proxy,
+                                        )
+                                        ozon_access = fresh_access
+                                        ozon_images = ImageStore(
+                                            lambda: fresh_access.page.request,
+                                            cancel_requested=self._stop_event.is_set,
+                                            sleep=self._pause,
+                                            fallback_request_provider=(
+                                                direct_images_request if self.proxy is not None else None
+                                            ),
+                                        )
+                                        marketplace_access = fresh_access
+                                        try:
+                                            snapshot = marketplace_access.fetch(url)
+                                        except BrowserAccessDenied as fresh_error:
+                                            if fresh_error.status != 403:
+                                                raise
+                                            error = fresh_error
+                                        else:
+                                            fresh_succeeded = True
+                                    if not fresh_succeeded:
+                                        if self.proxy is None or ozon_direct_active:
+                                            raise error
+                                        self.ozon_direct_started.emit(product.product_id)
+                                        if ozon_direct_access is None:
+                                            ozon_direct_access = self._temporary_access(
+                                                recovery, access,
+                                                prefix="web-parser-ozon-direct-",
+                                                marketplace="Ozon", proxy=None,
+                                            )
+                                            ozon_direct_images = ImageStore(
+                                                lambda: ozon_direct_access.page.request,
+                                                cancel_requested=self._stop_event.is_set,
+                                                sleep=self._pause,
+                                                fallback_request_provider=lambda: access.page.request,
+                                                primary_route_label="Напрямую",
+                                                fallback_route_label="через прокси",
+                                            )
+                                        marketplace_access = ozon_direct_access
+                                        try:
+                                            snapshot = marketplace_access.fetch(url)
+                                        except BrowserAccessCancelled:
+                                            raise
+                                        except BrowserAccessError as direct_error:
+                                            raise BrowserAccessError(
+                                                f"Через прокси: {error}; напрямую: {direct_error}"
+                                            ) from direct_error
+                                        ozon_access = ozon_direct_access
+                                        ozon_images = ozon_direct_images
+                                        ozon_direct_active = True
                                 status = snapshot.status
                                 if marketplace == "Ozon":
                                     parsed_ozon = parse_ozon_search(marketplace_access)
@@ -257,7 +306,8 @@ class BrowserWalkThread(QThread):
                             self.loaded += 1
                             self.page_loaded.emit(
                                 product.product_id, marketplace, index, total, status,
-                                marketplace == "Яндекс Маркет" and yandex_direct_active,
+                                (marketplace == "Яндекс Маркет" and yandex_direct_active)
+                                or (marketplace == "Ozon" and ozon_direct_active),
                             )
         except (BrowserAccessError, OzonError, WildberriesError, YandexMarketError) as error:
             if self.stop_requested:

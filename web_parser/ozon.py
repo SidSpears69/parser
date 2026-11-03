@@ -16,9 +16,12 @@ from web_parser.browser_access import BrowserPageAccess
 _RESULT_LIMIT = 6
 _CARD_SELECTOR = '[data-widget="tileGridDesktop"] .tile-root[data-index]'
 _READY_CHECK = """(selector) => {
-    const card = document.querySelector(selector);
-    return !!card && !!card.querySelector('a[href*="/product/"] span.tsBody500Medium')
-        && !!card.querySelector('span.tsHeadline500Medium');
+    const cards = [...document.querySelectorAll(selector)].slice(0, 6);
+    return cards.length === 6 && cards.every(card =>
+        !!card.querySelector('a[href*="/product/"] span.tsBody500Medium')
+        && !!card.querySelector('span.tsHeadline500Medium')
+        && !!card.querySelector('a[href*="/product/"] img[src^="https://ir.ozone.ru/"]')
+    );
 }"""
 _EXTRACT_CARDS = """(selector) => {
     const cards = [...document.querySelectorAll(selector)].slice(0, 6);
@@ -132,7 +135,7 @@ def parse_ozon_search(access: BrowserPageAccess) -> tuple[OzonProduct, ...]:
     page = access.page
     try:
         try:
-            page.wait_for_function(_READY_CHECK, arg=_CARD_SELECTOR, timeout=8_000)
+            page.wait_for_function(_READY_CHECK, arg=_CARD_SELECTOR, timeout=12_000)
         except PlaywrightTimeoutError:
             pass
         raw_cards = page.evaluate(_EXTRACT_CARDS, _CARD_SELECTOR)

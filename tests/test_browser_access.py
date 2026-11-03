@@ -11,7 +11,7 @@ from playwright.sync_api import Error as PlaywrightError, TimeoutError as Playwr
 
 from web_parser.browser_access import (
     BrowserAccessCancelled, BrowserAccessDenied, BrowserAccessError,
-    BrowserPageAccess, YandexCaptchaDenied, browser_profile_dir,
+    BrowserFetchFailed, BrowserPageAccess, YandexCaptchaDenied, browser_profile_dir,
 )
 from web_parser.browser_discovery import BrowserInstallation
 from web_parser.config import BROWSERS
@@ -200,6 +200,13 @@ class BrowserAccessTests(unittest.TestCase):
             result = access.fetch(URL)
         self.assertEqual(result.attempts, 3)
         self.assertEqual(self.sleep.call_count, 2)
+
+    def test_navigation_timeout_after_all_attempts_is_recoverable(self):
+        self.page.goto.side_effect = PlaywrightTimeoutError("Timeout 30000ms exceeded")
+        with self.access() as access:
+            with self.assertRaisesRegex(BrowserFetchFailed, "Попыток: 3"):
+                access.fetch(YANDEX_URL)
+        self.assertEqual(self.page.goto.call_count, 3)
 
     def test_permanent_http_error_stops_without_retry(self):
         self.page.goto.return_value = Mock(ok=False, status=404)

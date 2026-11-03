@@ -116,7 +116,7 @@ def _image_extension(payload: bytes) -> str:
 
 
 class ImageStore:
-    """Save primary photos for all marketplaces using the active browser request context."""
+    """Save original photos with an optional direct route after proxy failures."""
 
     def __init__(
         self, request_provider: Callable[[], APIRequestContext],
@@ -124,9 +124,13 @@ class ImageStore:
         cancel_requested: Callable[[], bool] = lambda: False,
         sleep: Callable[[float], None] = time.sleep,
         fallback_request_provider: Callable[[], APIRequestContext] | None = None,
+        primary_route_label: str = "Через прокси",
+        fallback_route_label: str = "напрямую",
     ) -> None:
         self._request_provider = request_provider
         self._fallback_request_provider = fallback_request_provider
+        self._primary_route_label = primary_route_label
+        self._fallback_route_label = fallback_route_label
         self.root = Path(root)
         self._cancel_requested = cancel_requested
         self._sleep = sleep
@@ -139,8 +143,8 @@ class ImageStore:
         _check_image_url(url, marketplace)
         try:
             return self._download_from(self._request_provider, url, marketplace, referer)
-        except _ImageRequestFailed as proxy_error:
-            if marketplace != "Wildberries" or self._fallback_request_provider is None:
+        except _ImageRequestFailed as primary_error:
+            if self._fallback_request_provider is None:
                 raise
             try:
                 return self._download_from(
@@ -148,10 +152,11 @@ class ImageStore:
                 )
             except ImageDownloadCancelled:
                 raise
-            except ImageDownloadError as direct_error:
+            except ImageDownloadError as fallback_error:
                 raise ImageDownloadError(
-                    f"Через прокси: {proxy_error}; напрямую: {direct_error}"
-                ) from direct_error
+                    f"{self._primary_route_label}: {primary_error}; "
+                    f"{self._fallback_route_label}: {fallback_error}"
+                ) from fallback_error
 
     def _download_from(
         self, request_provider: Callable[[], APIRequestContext],

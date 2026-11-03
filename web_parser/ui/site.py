@@ -595,6 +595,7 @@ class SitePage(QWidget):
         thread.yandex_parsed.connect(self._walk_yandex_parsed)
         thread.image_failed.connect(self._walk_image_failed)
         thread.ozon_recovery_started.connect(self._walk_ozon_recovery_started)
+        thread.ozon_direct_started.connect(self._walk_ozon_direct_started)
         thread.yandex_direct_started.connect(self._walk_yandex_direct_started)
         thread.finished.connect(self._walk_finished)
         thread.start()
@@ -630,16 +631,18 @@ class SitePage(QWidget):
         direct: bool,
     ) -> None:
         if not self._shutting_down:
-            detail = (
-                f"JSON: {len(self._wildberries_results.get(product_id, ()))} товаров"
-                if marketplace == "Wildberries" else
-                f"карточек: {len(self._ozon_results.get(product_id, ()))}; "
-                + ("страница открылась после проверки браузера (первичный HTTP 403)"
-                   if status == 403 else f"HTTP {status}")
-                if marketplace == "Ozon" else
-                f"карточек: {len(self._yandex_results.get(product_id, ()))}; "
-                f"HTTP {status}{', без прокси' if direct else ''}"
-            )
+            if marketplace == "Wildberries":
+                detail = f"JSON: {len(self._wildberries_results.get(product_id, ()))} товаров"
+            elif marketplace == "Ozon":
+                access_detail = (
+                    "страница открылась после проверки браузера (первичный HTTP 403)"
+                    if status == 403 else f"HTTP {status}"
+                )
+                detail = f"карточек: {len(self._ozon_results.get(product_id, ()))}; {access_detail}"
+            else:
+                detail = f"карточек: {len(self._yandex_results.get(product_id, ()))}; HTTP {status}"
+            if direct:
+                detail += "; без прокси"
             self.run_status.setText(f"Загружено {index}/{total}: {marketplace}, товар {product_id}, {detail}.")
 
     @Slot(str)
@@ -650,10 +653,18 @@ class SitePage(QWidget):
             )
 
     @Slot(str)
+    def _walk_ozon_direct_started(self, product_id: str) -> None:
+        if not self._shutting_down:
+            self.run_status.setText(
+                f"Ozon показал капчу для товара {product_id} и в новом профиле; "
+                "повторная попытка без прокси…"
+            )
+
+    @Slot(str)
     def _walk_yandex_direct_started(self, product_id: str) -> None:
         if not self._shutting_down:
             self.run_status.setText(
-                f"Яндекс Маркет показал капчу для товара {product_id}; "
+                f"Яндекс Маркет не открылся через прокси для товара {product_id}; "
                 "повторная попытка без прокси…"
             )
 

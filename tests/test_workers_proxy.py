@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import patch
 
 from web_parser.browser_access import (
-    BrowserAccessDenied, BrowserAccessError, PageSnapshot, YandexCaptchaDenied,
+    BrowserAccessDenied, BrowserAccessError, BrowserFetchFailed, PageSnapshot,
     browser_profile_dir,
 )
 from web_parser.browser_discovery import BrowserInstallation
@@ -17,7 +17,7 @@ from web_parser.ui.workers import BrowserWalkThread
 
 
 class WorkerProxyTests(unittest.TestCase):
-    def test_yandex_captcha_retries_directly_without_changing_other_marketplaces(self):
+    def test_yandex_timeout_retries_directly_without_changing_other_marketplaces(self):
         links = tuple(ProductLinks(
             str(index), f"https://www.ozon.ru/search/?text={index}",
             f"https://www.wildberries.ru/search/{index}",
@@ -47,7 +47,7 @@ class WorkerProxyTests(unittest.TestCase):
             def fetch(self, url):
                 visited.append((self.direct, url))
                 if "market.yandex.ru" in url and not self.direct:
-                    raise YandexCaptchaDenied(200, "обнаружена капча Яндекс Маркета")
+                    raise BrowserFetchFailed("Не удалось получить страницу. Попыток: 3; тайм-аут.")
                 return PageSnapshot(url, url, 200, "<html>ok</html>", 1)
 
             def fetch_wildberries_json(self, url):
@@ -183,6 +183,95 @@ class WorkerProxyTests(unittest.TestCase):
             [False, True, True],
         )
         self.assertTrue(all(not fresh for fresh, url in visited if "ozon.ru" not in url))
+
+    def test_ozon_retries_directly_if_fresh_proxy_profile_still_has_captcha(self):
+        links = (ProductLinks(
+            "2834", "https://www.ozon.ru/search/?text=anchor+cord+fl",
+            "https://www.wildberries.ru/catalog/0/search.aspx?search=rope",
+            "https://market.yandex.ru/search?text=rope",
+        ),)
+        upstream_proxy = {"server": "socks5://proxy.example:1080"}
+        profiles = []
+        visited = []
+        image_routes = []
+
+        class FakeAccess:
+            def __init__(self, *_args, profile_dir, proxy, **_options):
+                self.route = "direct" if proxy is None else "proxy"
+                self.page = SimpleNamespace(request=self.route)
+                self.playwright = object()
+                self.effective_proxy = proxy
+                profiles.append((profile_dir, proxy))
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                pass
+
+            def fetch(self, url):
+                visited.append((self.route, url))
+                if "ozon.ru" in url and self.route == "proxy":
+                    raise BrowserAccessDenied(403, "капча Ozon")
+                return PageSnapshot(url, url, 200, "<html>ok</html>", 1)
+
+            def fetch_wildberries_json(self, url):
+                visited.append((self.route, url))
+                return {"products": []}
+
+        class FakeWildberriesClient:
+            def __init__(self, **_options):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                pass
+
+            @staticmethod
+            def parse_document(_document):
+                return ()
+
+        class FakeImageStore:
+            def __init__(self, request_provider, **_options):
+                self.request_provider = request_provider
+
+            def save_products(self, _site, _id, marketplace, _products, _url):
+                image_routes.append((marketplace, self.request_provider()))
+                return ImageBatch((), ())
+
+        worker = BrowserWalkThread(
+            "sail-master.ru", BrowserInstallation("Google Chrome", Path(__file__)),
+            links, 0, proxy=upstream_proxy,
+        )
+        recoveries = []
+        direct_attempts = []
+        loaded = []
+        worker.ozon_recovery_started.connect(recoveries.append)
+        worker.ozon_direct_started.connect(direct_attempts.append)
+        worker.page_loaded.connect(lambda *args: loaded.append(args))
+        with (
+            patch("web_parser.ui.workers.BrowserPageAccess", FakeAccess),
+            patch("web_parser.ui.workers.WildberriesClient", FakeWildberriesClient),
+            patch("web_parser.ui.workers.ImageStore", FakeImageStore),
+            patch("web_parser.ui.workers.parse_ozon_search", return_value=()),
+            patch("web_parser.ui.workers.parse_yandex_search", return_value=()),
+        ):
+            worker.run()
+
+        self.assertEqual((worker.loaded, worker.failed), (3, 0))
+        self.assertEqual(recoveries, ["2834"])
+        self.assertEqual(direct_attempts, ["2834"])
+        self.assertEqual([route for route, url in visited if "ozon.ru" in url],
+                         ["proxy", "proxy", "direct"])
+        self.assertTrue(all(route == "proxy" for route, url in visited if "ozon.ru" not in url))
+        self.assertEqual(image_routes, [
+            ("Ozon", "direct"), ("Wildberries", "proxy"), ("Яндекс Маркет", "proxy"),
+        ])
+        self.assertEqual([route for _, route in profiles], [upstream_proxy, upstream_proxy, None])
+        self.assertTrue(all(not profile.exists() for profile, _ in profiles[1:]))
+        self.assertTrue(loaded[0][-1])
 
     def test_ozon_parse_error_is_logged_and_next_link_is_visited(self):
         links = tuple(ProductLinks(

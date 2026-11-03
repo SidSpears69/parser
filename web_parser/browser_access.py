@@ -70,6 +70,10 @@ class BrowserAccessError(RuntimeError):
     """The selected browser could not return a usable page."""
 
 
+class BrowserFetchFailed(BrowserAccessError):
+    """Navigation exhausted all attempts without a usable page."""
+
+
 class BrowserAccessCancelled(BrowserAccessError):
     """The user stopped the page sequence."""
 
@@ -529,7 +533,7 @@ class BrowserPageAccess:
             except PlaywrightError as error:
                 self._check_cancelled()
                 last_problem = f"ошибка браузера: {self._safe_error(error)}"
-        raise BrowserAccessError(
+        raise BrowserFetchFailed(
             f"Не удалось получить страницу {url}. Попыток: {self.attempts}; {last_problem}."
         )
 

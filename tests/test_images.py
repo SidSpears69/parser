@@ -184,6 +184,41 @@ class ImageStoreTests(unittest.TestCase):
         self.assertEqual(direct.get.call_count, 2)
         self.assertEqual(batch.saved[0].path.read_bytes(), WEBP)
 
+    def test_ozon_image_retries_directly_after_proxy_timeout(self):
+        direct = Mock()
+        self.request.get.side_effect = PlaywrightError("Timeout 20000ms exceeded")
+        direct.get.return_value = response(OZON_IMAGE, JPEG)
+        store = ImageStore(
+            lambda: self.request, self.root, sleep=lambda _seconds: None,
+            fallback_request_provider=lambda: direct,
+        )
+        batch = store.save_products(
+            "sail-master.ru", "2834", "Ozon", [Product(OZON_IMAGE)],
+            "https://www.ozon.ru/search/?text=anchor+cord+fl",
+        )
+        self.assertEqual(batch.failed, ())
+        self.assertEqual(self.request.get.call_count, 3)
+        direct.get.assert_called_once()
+        self.assertEqual(batch.saved[0].path.read_bytes(), JPEG)
+
+    def test_direct_ozon_image_retries_through_proxy_after_timeout(self):
+        direct = Mock()
+        direct.get.side_effect = PlaywrightError("Timeout 20000ms exceeded")
+        self.request.get.return_value = response(OZON_IMAGE, JPEG)
+        store = ImageStore(
+            lambda: direct, self.root, sleep=lambda _seconds: None,
+            fallback_request_provider=lambda: self.request,
+            primary_route_label="Напрямую", fallback_route_label="через прокси",
+        )
+        batch = store.save_products(
+            "sail-master.ru", "2834", "Ozon", [Product(OZON_IMAGE)],
+            "https://www.ozon.ru/search/?text=anchor+cord+fl",
+        )
+        self.assertEqual(batch.failed, ())
+        self.assertEqual(direct.get.call_count, 3)
+        self.request.get.assert_called_once()
+        self.assertEqual(batch.saved[0].path.read_bytes(), JPEG)
+
     def test_wildberries_image_reports_both_routes_if_direct_request_also_fails(self):
         direct = Mock()
         self.request.get.return_value = response(WB_IMAGE, b"", status=404)
