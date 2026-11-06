@@ -12,6 +12,7 @@ from web_parser.ozon import OzonError, parse_ozon_cards, parse_ozon_search
 
 def card(**changes: object) -> dict[str, object]:
     item: dict[str, object] = {
+        "product_url": "/product/shnur-yakhtennyy-classic-123456789/?from=search",
         "image_url": "https://ir.ozone.ru/s3/multimedia/wc500/photo.jpg",
         "current_price": "11\u2009747\u2009₽",
         "original_price": "28\u2009650\u2009₽28\u2009650\u2009₽",
@@ -34,6 +35,10 @@ class OzonTests(unittest.TestCase):
         self.assertEqual(first.name, "Шнур 0")
         self.assertEqual(first.rating, Decimal("5.0"))
         self.assertEqual(first.reviews, 23)
+        self.assertEqual(
+            first.product_url,
+            "https://www.ozon.ru/product/shnur-yakhtennyy-classic-123456789/?from=search",
+        )
         self.assertEqual(products[-1].name, "Шнур 5")
 
     def test_card_without_discount_or_reviews(self):
@@ -64,6 +69,8 @@ class OzonTests(unittest.TestCase):
             parse_ozon_cards([card(image_url=None)])
         with self.assertRaisesRegex(OzonError, "№1: нет названия"):
             parse_ozon_cards([card(name="")])
+        with self.assertRaisesRegex(OzonError, "№1: нет ссылки на карточку"):
+            parse_ozon_cards([card(product_url="https://example.org/product/123")])
 
     def test_no_cards_is_distinct_from_empty_search(self):
         class FakePage:

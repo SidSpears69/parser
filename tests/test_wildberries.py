@@ -56,6 +56,9 @@ class WildberriesParserTests(unittest.TestCase):
         self.assertEqual(first.rating, Decimal("4.9"))
         self.assertEqual(first.reviews, 26)
         self.assertEqual(
+            first.product_url, "https://www.wildberries.ru/catalog/519585970/detail.aspx",
+        )
+        self.assertEqual(
             first.image_url,
             "https://basket-28.wbbasket.ru/vol5195/part519585/519585970/images/big/1.webp?picsUpdate=2",
         )

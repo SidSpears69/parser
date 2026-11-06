@@ -51,6 +51,7 @@ class WildberriesProduct:
     name: str
     rating: Decimal | None
     reviews: int
+    product_url: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -184,6 +185,7 @@ def parse_search_json(document: object, routes_document: object) -> tuple[Wildbe
         result.append(WildberriesProduct(
             wb_id, image_url, price, discounted_price, name.strip(),
             Decimal(str(rating)) if rating is not None else None, reviews,
+            f"https://www.wildberries.ru/catalog/{wb_id}/detail.aspx",
         ))
     return tuple(result)
 

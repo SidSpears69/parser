@@ -14,6 +14,7 @@ from web_parser.browser_access import (
     BrowserFetchFailed, BrowserPageAccess, YandexCaptchaDenied, browser_profile_dir,
 )
 from web_parser.browser_discovery import BrowserInstallation
+from web_parser.ftp_export import FTPExportCancelled, FTPExportError, FTPExportResult, export_run
 from web_parser.images import ImageDownloadCancelled, ImageStore, SavedImage
 from web_parser.ozon import OzonError, OzonProduct, parse_ozon_search
 from web_parser.product_links import ProductLinks, ProductLinksError, fetch_product_links
@@ -36,10 +37,12 @@ class BrowserWalkThread(QThread):
     ozon_recovery_started = Signal(str)
     ozon_direct_started = Signal(str)
     yandex_direct_started = Signal(str)
+    ftp_upload_started = Signal()
 
     def __init__(
         self, site: str, installation: BrowserInstallation, links: tuple[ProductLinks, ...],
         pause_seconds: int, parent=None, *, proxy: dict[str, str] | None = None,
+        ftp_settings: dict[str, object] | None = None,
     ) -> None:
         super().__init__(parent)
         self.site = site
@@ -47,6 +50,7 @@ class BrowserWalkThread(QThread):
         self.links = links
         self.pause_seconds = pause_seconds
         self.proxy = proxy.copy() if proxy is not None else None
+        self.ftp_settings = ftp_settings.copy() if ftp_settings is not None else None
         self.loaded = 0
         self.failed = 0
         self.cancelled = False
@@ -56,6 +60,8 @@ class BrowserWalkThread(QThread):
         self.yandex_results: dict[str, tuple[YandexMarketProduct, ...]] = {}
         self.saved_images: dict[tuple[str, str], tuple[SavedImage, ...]] = {}
         self.image_failures = 0
+        self.ftp_result: FTPExportResult | None = None
+        self.ftp_error: str | None = None
         self._stop_event = Event()
 
     @property
@@ -309,6 +315,28 @@ class BrowserWalkThread(QThread):
                                 (marketplace == "Яндекс Маркет" and yandex_direct_active)
                                 or (marketplace == "Ozon" and ozon_direct_active),
                             )
+            if self.ftp_settings is not None and str(self.ftp_settings.get("host", "")).strip():
+                if not any(
+                    products for results in (
+                        self.ozon_results, self.wildberries_results, self.yandex_results,
+                    ) for products in results.values()
+                ):
+                    self.ftp_error = "Нет собранных результатов для выгрузки."
+                else:
+                    self.ftp_upload_started.emit()
+                    try:
+                        self.ftp_result = export_run(
+                            self.site, self.links, {
+                                "Ozon": self.ozon_results,
+                                "Wildberries": self.wildberries_results,
+                                "Яндекс Маркет": self.yandex_results,
+                            }, self.saved_images, self.ftp_settings,
+                            cancel_requested=self._stop_event.is_set,
+                        )
+                    except FTPExportCancelled:
+                        self.cancelled = True
+                    except FTPExportError as error:
+                        self.ftp_error = str(error)
         except (BrowserAccessError, OzonError, WildberriesError, YandexMarketError) as error:
             if self.stop_requested:
                 self.cancelled = True

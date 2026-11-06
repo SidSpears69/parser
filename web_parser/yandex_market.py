@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 import re
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -25,7 +25,13 @@ _EXTRACT_CARDS = """(selector) => [...document.querySelectorAll(selector)].slice
         const discount = discounts.find(item => item.priceType === 'withDiscount');
         const rating = card.querySelector('[data-zone-name="rating"] .ds-rating__value');
         const ratingText = card.querySelector('[data-zone-name="rating"]')?.innerText || '';
+        const title = card.querySelector('[data-auto="snippet-title"]');
+        const gallery = card.querySelector('[data-auto="galleryLink"]');
+        const link = title?.closest('a[href]') || title?.querySelector('a[href]')
+            || gallery?.closest('a[href]') || gallery?.querySelector('a[href]')
+            || card.querySelector('a[href*="/product"], a[href*="/card/"], a[href*="/offer/"]');
         return {
+            product_url: link?.getAttribute('href') ?? null,
             image_url: card.querySelector('[data-auto="galleryLink"] img')
                 ?.getAttribute('src') ?? null,
             price: details.price ?? null,
@@ -51,6 +57,7 @@ class YandexMarketProduct:
     name: str
     rating: Decimal | None
     reviews: int
+    product_url: str
 
 
 def _money(value: object, position: int, label: str) -> Decimal:
@@ -84,6 +91,7 @@ def parse_yandex_cards(raw_cards: object) -> tuple[YandexMarketProduct, ...]:
         if not isinstance(card, dict):
             raise YandexMarketError(f"Товар Яндекс Маркета №{position}: неверный формат карточки.")
         image_url = card.get("image_url")
+        raw_product_url = card.get("product_url")
         name = card.get("name")
         if (not isinstance(image_url, str)
                 or urlsplit(image_url).scheme != "https"
@@ -91,6 +99,16 @@ def parse_yandex_cards(raw_cards: object) -> tuple[YandexMarketProduct, ...]:
             raise YandexMarketError(f"Товар Яндекс Маркета №{position}: нет основного фото.")
         if not isinstance(name, str) or not name.strip():
             raise YandexMarketError(f"Товар Яндекс Маркета №{position}: нет названия.")
+        product_url = (
+            urljoin("https://market.yandex.ru", raw_product_url)
+            if isinstance(raw_product_url, str) else ""
+        )
+        product_parts = urlsplit(product_url)
+        if (
+            product_parts.scheme != "https" or product_parts.hostname != "market.yandex.ru"
+            or product_parts.path in {"", "/"} or product_parts.username or product_parts.password
+        ):
+            raise YandexMarketError(f"Товар Яндекс Маркета №{position}: нет ссылки на карточку.")
         price = _money(card.get("price"), position, "цена")
         discounted_price = _money(card.get("discounted_price"), position, "цена со скидкой")
         raw_rating = card.get("rating")
@@ -106,7 +124,7 @@ def parse_yandex_cards(raw_cards: object) -> tuple[YandexMarketProduct, ...]:
                 raise YandexMarketError(f"Товар Яндекс Маркета №{position}: неверный рейтинг.")
         products.append(YandexMarketProduct(
             image_url, price, discounted_price, name.strip(), rating,
-            _reviews(card.get("reviews"), position),
+            _reviews(card.get("reviews"), position), product_url,
         ))
     return tuple(products)
 

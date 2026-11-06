@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import Decimal
 import re
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -31,6 +31,7 @@ _EXTRACT_CARDS = """(selector) => {
         const original = [...card.querySelectorAll('span.tsBodyControl400Small')]
             .find(element => element.textContent.includes('₽'));
         return {
+            product_url: card.querySelector('a[href*="/product/"]')?.getAttribute('href') ?? null,
             image_url: card.querySelector('a[href*="/product/"] img[src^="https://ir.ozone.ru/"]')
                 ?.getAttribute('src') ?? null,
             current_price: card.querySelector('span.tsHeadline500Medium')?.textContent ?? null,
@@ -60,6 +61,7 @@ class OzonProduct:
     name: str
     rating: Decimal | None
     reviews: int
+    product_url: str
 
 
 def _price(value: object, position: int, label: str) -> Decimal:
@@ -104,6 +106,7 @@ def parse_ozon_cards(raw_cards: object) -> tuple[OzonProduct, ...]:
         if not isinstance(card, dict):
             raise OzonError(f"Товар Ozon №{position}: неверный формат карточки.")
         image_url = card.get("image_url")
+        raw_product_url = card.get("product_url")
         name = card.get("name")
         if (not isinstance(image_url, str)
                 or urlsplit(image_url).scheme != "https"
@@ -111,6 +114,14 @@ def parse_ozon_cards(raw_cards: object) -> tuple[OzonProduct, ...]:
             raise OzonError(f"Товар Ozon №{position}: нет основного фото.")
         if not isinstance(name, str) or not name.strip():
             raise OzonError(f"Товар Ozon №{position}: нет названия.")
+        product_url = urljoin("https://www.ozon.ru", raw_product_url) if isinstance(raw_product_url, str) else ""
+        product_parts = urlsplit(product_url)
+        if (
+            product_parts.scheme != "https" or product_parts.hostname not in {"ozon.ru", "www.ozon.ru"}
+            or not product_parts.path.startswith("/product/")
+            or product_parts.username or product_parts.password
+        ):
+            raise OzonError(f"Товар Ozon №{position}: нет ссылки на карточку.")
         discounted_price = _price(card.get("current_price"), position, "цена со скидкой")
         original = card.get("original_price")
         price = _price(original, position, "цена") if original is not None else discounted_price
@@ -125,7 +136,7 @@ def parse_ozon_cards(raw_cards: object) -> tuple[OzonProduct, ...]:
                 raise OzonError(f"Товар Ozon №{position}: неверный рейтинг.")
         result.append(OzonProduct(
             _unscaled_image_url(image_url), price, discounted_price, name.strip(), rating,
-            _reviews(card.get("reviews"), position),
+            _reviews(card.get("reviews"), position), product_url,
         ))
     return tuple(result)
 

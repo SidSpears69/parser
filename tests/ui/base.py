@@ -23,13 +23,14 @@ def sample_wildberries_product() -> WildberriesProduct:
     return WildberriesProduct(
         519585970, "https://basket-28.wbbasket.ru/vol5195/part519585/519585970/images/big/1.webp",
         Decimal("3229"), Decimal("930"), "Шнур", Decimal("4.9"), 26,
+        "https://www.wildberries.ru/catalog/519585970/detail.aspx",
     )
 
 
 def sample_ozon_product() -> OzonProduct:
     return OzonProduct(
         "https://ir.ozone.ru/s3/test/photo.jpg", Decimal("1000"), Decimal("750"),
-        "Шнур Ozon", Decimal("4.8"), 12,
+        "Шнур Ozon", Decimal("4.8"), 12, "https://www.ozon.ru/product/shnur-123/",
     )
 
 
@@ -37,6 +38,7 @@ def sample_yandex_product() -> YandexMarketProduct:
     return YandexMarketProduct(
         "https://avatars.mds.yandex.net/get-mpic/123/photo/orig",
         Decimal("1200"), Decimal("900"), "Шнур Маркет", Decimal("4.7"), 18,
+        "https://market.yandex.ru/product--shnur/123",
     )
 
 

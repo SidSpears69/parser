@@ -178,11 +178,19 @@ class SitePage(QWidget):
         self.ftp_user.setAccessibleName("Логин FTP")
         self.ftp_password.setAccessibleName("Пароль FTP")
         self.ftp_host.setAccessibleName("Адрес FTP")
-        self.remote_path = field("/site/parser/", "remotePath")
+        self.remote_path = field("/", "remotePath")
+        self.remote_path.setToolTip(
+            "Для каталога входа на FTP укажите /. JSON сохраняется здесь, фото — в images/."
+        )
         ftp_form.addRow("Сервер", connection)
         ftp_form.addRow("Логин / пароль", credentials)
-        ftp_form.addRow("Каталог JSON", self.remote_path)
+        ftp_form.addRow("Базовый каталог", self.remote_path)
         ftp_layout.addLayout(ftp_form)
+        self.ftp_status = label("При настроенном FTP выгрузка начнётся после сбора данных.", "hint")
+        self.ftp_status.setTextFormat(Qt.TextFormat.PlainText)
+        self.ftp_status.setWordWrap(True)
+        self.ftp_status.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        ftp_layout.addWidget(self.ftp_status)
         grid.addWidget(ftp, 0, 1)
 
         browser, browser_layout = section("Браузер и обработка")
@@ -552,6 +560,10 @@ class SitePage(QWidget):
         self.browser.setEnabled(not walking and not self._shutting_down)
         self.pause.setEnabled(not walking and not self._shutting_down)
         self.refresh_browsers_button.setEnabled(not walking and not self._shutting_down)
+        for widget in (
+            self.ftp_host, self.ftp_port, self.ftp_user, self.ftp_password, self.remote_path,
+        ):
+            widget.setEnabled(not walking and not self._shutting_down)
         self.start_button.setEnabled(
             bool(self._product_links) and self._selected_installation() is not None
             and not walking and self._links_thread is None and not self._shutting_down
@@ -576,13 +588,14 @@ class SitePage(QWidget):
             return
         thread = BrowserWalkThread(
             self.site, installation, self._product_links, self.pause.value(), self,
-            proxy=proxy,
+            proxy=proxy, ftp_settings=self.settings()["ftp"],
         )
         self._walk_thread = thread
         self._clear_ozon_results()
         self._clear_wildberries_results()
         self._clear_yandex_results()
         self._saved_images = {}
+        self.ftp_status.setText("Ожидание завершения сбора данных…")
         self.state_label.setText("Запуск…")
         self.run_status.setText(
             f"Запускается {installation.name}; заданий в очереди: {len(self._product_links) * 3}."
@@ -597,6 +610,7 @@ class SitePage(QWidget):
         thread.ozon_recovery_started.connect(self._walk_ozon_recovery_started)
         thread.ozon_direct_started.connect(self._walk_ozon_direct_started)
         thread.yandex_direct_started.connect(self._walk_yandex_direct_started)
+        thread.ftp_upload_started.connect(self._walk_ftp_upload_started)
         thread.finished.connect(self._walk_finished)
         thread.start()
         self._update_links_controls()
@@ -668,6 +682,12 @@ class SitePage(QWidget):
                 "повторная попытка без прокси…"
             )
 
+    @Slot()
+    def _walk_ftp_upload_started(self) -> None:
+        if not self._shutting_down:
+            self.ftp_status.setText("Загружаются фотографии и JSON на FTP…")
+            self.run_status.setText("Сбор завершён; идёт выгрузка на FTP…")
+
     def _show_parsed_products(
         self, product_id: str, products: tuple[_Product, ...],
         results: dict[str, tuple[_Product, ...]],
@@ -731,6 +751,19 @@ class SitePage(QWidget):
         self._walk_thread = None
         self._saved_images = thread.saved_images.copy()
         if not self._shutting_down:
+            if thread.ftp_result is not None:
+                result = thread.ftp_result
+                self.ftp_status.setText(
+                    f"Выгружено: {result.products} ID, {result.uploaded_images} фото; "
+                    f"JSON: {_soft_wrap(result.remote_json)}"
+                )
+            elif thread.ftp_error is not None:
+                self.ftp_status.setText(f"Ошибка выгрузки: {thread.ftp_error}")
+                self.log.append_error("", "", f"FTP: {thread.ftp_error}")
+            elif thread.cancelled:
+                self.ftp_status.setText("Выгрузка не завершена: обход остановлен.")
+            else:
+                self.ftp_status.setText("FTP не настроен; данные остались локально.")
             if thread.error:
                 self.state_label.setText("Ошибка")
                 self.run_status.setText(f"Не удалось выполнить обход: {thread.error}")
@@ -745,6 +778,12 @@ class SitePage(QWidget):
                     f"товаров Яндекс Маркета: {sum(len(items) for items in self._yandex_results.values())}; "
                     f"фото: {sum(len(items) for items in self._saved_images.values())}; "
                     f"ошибок фото: {thread.image_failures}."
+                    + (
+                        f" FTP: {thread.ftp_result.uploaded_images} фото и JSON выгружены."
+                        if thread.ftp_result is not None else
+                        " FTP: ошибка выгрузки."
+                        if thread.ftp_error is not None else ""
+                    )
                 )
             self._update_links_controls()
         thread.deleteLater()

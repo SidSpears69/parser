@@ -11,6 +11,7 @@ from web_parser.yandex_market import (
 
 def _card(index: int) -> dict[str, object]:
     return {
+        "product_url": f"/product--shnur-{index}/12345",
         "image_url": f"https://avatars.mds.yandex.net/get-mpic/123/{index}/orig",
         "price": 17500,
         "discounted_price": "3812",
@@ -32,6 +33,7 @@ class YandexMarketTests(unittest.TestCase):
         self.assertEqual(products[0].discounted_price, Decimal("3812"))
         self.assertEqual(products[0].rating, Decimal("4.9"))
         self.assertEqual(products[0].reviews, 1234)
+        self.assertEqual(products[0].product_url, "https://market.yandex.ru/product--shnur-0/12345")
 
     def test_missing_rating_and_reviews_are_allowed(self):
         card = _card(0)
@@ -49,6 +51,10 @@ class YandexMarketTests(unittest.TestCase):
         card = _card(0)
         card["price"] = None
         with self.assertRaisesRegex(YandexMarketError, "нет поля «цена»"):
+            parse_yandex_cards([card])
+        card = _card(0)
+        card["product_url"] = "javascript:alert(1)"
+        with self.assertRaisesRegex(YandexMarketError, "нет ссылки на карточку"):
             parse_yandex_cards([card])
 
     def test_empty_search_is_not_an_error(self):
