@@ -1,6 +1,6 @@
 """Controls and state for one source-site tab."""
 
-from datetime import datetime
+from datetime import datetime, time
 from pathlib import Path
 from typing import Callable, TypeVar
 
@@ -16,10 +16,12 @@ from web_parser.browser_discovery import BrowserInstallation
 from web_parser.images import SavedImage
 from web_parser.ozon import OzonProduct
 from web_parser.product_links import ProductLinks
+from web_parser.scheduler import Schedule
 from web_parser.ui.links import LinksPreviewTable
 from web_parser.ui.log import ErrorLog
 from web_parser.ui.ozon import OzonResultsTable
 from web_parser.ui.results import MarketplaceResultsTable
+from web_parser.ui.scheduler import TabScheduler
 from web_parser.ui.widgets import (
     ReadableComboBox, ReadableSpinBox, ReadableTimeEdit, field, form, label, section,
 )
@@ -81,6 +83,7 @@ class SitePage(QWidget):
         self._wildberries_results: dict[str, tuple[WildberriesProduct, ...]] = {}
         self._yandex_results: dict[str, tuple[YandexMarketProduct, ...]] = {}
         self._saved_images: dict[tuple[str, str], tuple[SavedImage, ...]] = {}
+        self._pending_scheduled_walk = False
         self._shutting_down = False
         self.setObjectName("sitePage")
         layout = QVBoxLayout(self)
@@ -136,6 +139,8 @@ class SitePage(QWidget):
         source_schedule_form.addRow("Время загрузки JSON", self.source_schedule_time)
         source_schedule_form.addRow("Повторять каждые", source_interval_row)
         source_layout.addLayout(source_schedule_form)
+        self.source_next_label = label("Следующая загрузка: выключена.", "hint")
+        source_layout.addWidget(self.source_next_label)
         self.source_schedule_enabled.toggled.connect(self._toggle_source_schedule)
         self._toggle_source_schedule(False)
         source_hint = label("JSON со списком ID товаров и ссылками на маркетплейсы.", "hint")
@@ -252,6 +257,8 @@ class SitePage(QWidget):
         schedule_form.addRow("Время начала", self.start_time)
         schedule_form.addRow("Повторять каждые", interval_row)
         schedule_layout.addLayout(schedule_form)
+        self.analysis_next_label = label("Следующий анализ: выключен.", "hint")
+        schedule_layout.addWidget(self.analysis_next_label)
         self.schedule_enabled.toggled.connect(self._toggle_schedule)
         self._toggle_schedule(False)
         grid.addWidget(schedule, 1, 1)
@@ -309,6 +316,20 @@ class SitePage(QWidget):
         self.source_url.textChanged.connect(self._clear_product_links)
         self.token.textChanged.connect(self._clear_product_links)
         self.load_links_button.clicked.connect(self._fetch_product_links)
+        self.scheduler = TabScheduler(self)
+        self.scheduler.source_due.connect(self._scheduled_source_due)
+        self.scheduler.analysis_due.connect(self._scheduled_analysis_due)
+        self.scheduler.changed.connect(self._update_schedule_status)
+        self.source_schedule_enabled.toggled.connect(self._configure_source_schedule)
+        self.source_schedule_time.timeChanged.connect(self._configure_source_schedule)
+        self.source_schedule_interval.valueChanged.connect(self._configure_source_schedule)
+        self.source_schedule_unit.currentIndexChanged.connect(self._configure_source_schedule)
+        self.schedule_enabled.toggled.connect(self._configure_analysis_schedule)
+        self.start_time.timeChanged.connect(self._configure_analysis_schedule)
+        self.interval.valueChanged.connect(self._configure_analysis_schedule)
+        self.interval_unit.currentIndexChanged.connect(self._configure_analysis_schedule)
+        self._configure_source_schedule()
+        self._configure_analysis_schedule()
 
     @property
     def product_links(self) -> tuple[ProductLinks, ...]:
@@ -358,6 +379,7 @@ class SitePage(QWidget):
         return self._links_thread is not None
 
     def _clear_product_links(self) -> None:
+        self._pending_scheduled_walk = False
         if self._links_thread is None:
             self._product_links = ()
             self._clear_ozon_results()
@@ -443,6 +465,12 @@ class SitePage(QWidget):
         self._update_links_controls()
         thread.token = ""
         thread.deleteLater()
+        if self._pending_scheduled_walk:
+            self._pending_scheduled_walk = False
+            if self._product_links:
+                self._start_walk()
+            else:
+                self.log.append_error("", "", "Расписание анализа: ссылки не загружены; запуск пропущен.")
         self.links_fetch_finished.emit()
 
     def _show_product_links(self) -> None:
@@ -505,6 +533,7 @@ class SitePage(QWidget):
     def shutdown_links(self) -> None:
         """Release a completed fetch worker when the window closes."""
         self._shutting_down = True
+        self.scheduler.stop()
         if self._links_thread is not None:
             self._links_thread.wait()
 
@@ -515,6 +544,7 @@ class SitePage(QWidget):
 
     def prepare_walk_shutdown(self) -> None:
         self._shutting_down = True
+        self.scheduler.stop()
         if self._walk_thread is not None:
             self._walk_thread.stop()
 
@@ -814,6 +844,75 @@ class SitePage(QWidget):
             self.source_schedule_time, self.source_schedule_interval, self.source_schedule_unit,
         ):
             widget.setEnabled(enabled)
+
+    def _configure_source_schedule(self) -> None:
+        schedule = None
+        if self.source_schedule_enabled.isChecked():
+            qtime = self.source_schedule_time.time()
+            schedule = Schedule(
+                time(qtime.hour(), qtime.minute()), self.source_schedule_interval.value(),
+                str(self.source_schedule_unit.currentData()),
+            )
+        self.scheduler.configure_source(schedule)
+
+    def _configure_analysis_schedule(self) -> None:
+        schedule = None
+        if self.schedule_enabled.isChecked():
+            qtime = self.start_time.time()
+            schedule = Schedule(
+                time(qtime.hour(), qtime.minute()), self.interval.value(),
+                str(self.interval_unit.currentData()),
+            )
+        else:
+            self._pending_scheduled_walk = False
+        self.scheduler.configure_analysis(schedule)
+
+    def _update_schedule_status(self) -> None:
+        source = self.scheduler.next_source
+        analysis = self.scheduler.next_analysis
+        self.source_next_label.setText(
+            f"Следующая загрузка: {source:%d.%m.%Y %H:%M}." if source else
+            "Следующая загрузка: выключена."
+        )
+        self.analysis_next_label.setText(
+            f"Следующий анализ: {analysis:%d.%m.%Y %H:%M}." if analysis else
+            "Следующий анализ: выключен."
+        )
+
+    def _scheduled_source_due(self) -> None:
+        if self._shutting_down:
+            return
+        if self._links_thread is not None or self._walk_thread is not None:
+            self.log.append_error("", "", "Расписание JSON: предыдущая операция ещё идёт; запуск пропущен.")
+            return
+        if not self.source_url.text().strip() or not self.token.text():
+            self.log.append_error("", "", "Расписание JSON: укажите URL источника и токен.")
+            return
+        self._fetch_product_links()
+
+    def _scheduled_analysis_due(self) -> None:
+        if self._shutting_down:
+            return
+        if self._walk_thread is not None:
+            self.log.append_error("", "", "Расписание анализа: предыдущий обход ещё идёт; запуск пропущен.")
+            return
+        if self._selected_installation() is None:
+            self.log.append_error("", "", "Расписание анализа: выбранный браузер не найден.")
+            return
+        if self._links_thread is not None:
+            self._pending_scheduled_walk = True
+            self.run_status.setText("Анализ по расписанию ожидает загрузки ссылок…")
+            return
+        if not self._product_links:
+            if not self.source_url.text().strip() or not self.token.text():
+                self.log.append_error("", "", "Расписание анализа: укажите URL источника и токен.")
+                return
+            self._pending_scheduled_walk = True
+            self._fetch_product_links()
+            return
+        self._start_walk()
+        if self._walk_thread is None:
+            self.log.append_error("", "", "Расписание анализа: запуск обхода не удался.")
 
     def settings(self) -> dict:
         """Return the settings currently shown on this site's tab."""
