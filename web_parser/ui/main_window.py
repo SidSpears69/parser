@@ -15,8 +15,9 @@ from web_parser.ui.widgets import ClickableCursorFilter, field, form, label, sec
 
 SITES = config.SITES
 
+
 class MainWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, *, log_root: Path | None = None):
         super().__init__()
         self.setWindowTitle("Web Parser — управление сбором данных")
         self.resize(1140, 900)
@@ -78,7 +79,12 @@ class MainWindow(QMainWindow):
         self._close_pending = False
         self.pages: dict[str, SitePage] = {}
         for site in SITES:
-            page = SitePage(site, proxy_provider=self._browser_proxy)
+            page = SitePage(
+                site,
+                proxy_provider=self._browser_proxy,
+                proxy_secrets=lambda: (self.proxy_username.text(), self.proxy_password.text()),
+                log_root=log_root,
+            )
             self.pages[site] = page
             scroll = QScrollArea()
             scroll.setWidgetResizable(True)
@@ -136,8 +142,8 @@ class MainWindow(QMainWindow):
     @Slot()
     def _resume_close(self) -> None:
         if self._close_pending and all(
-            not page.walk_pending and not page.links_fetch_pending
-            for page in self.pages.values()
+                not page.walk_pending and not page.links_fetch_pending
+                for page in self.pages.values()
         ):
             self._close_pending = False
             QTimer.singleShot(0, self.close)

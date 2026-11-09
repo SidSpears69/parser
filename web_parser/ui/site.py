@@ -71,6 +71,8 @@ class SitePage(QWidget):
     def __init__(
         self, site: str, parent: QWidget | None = None,
         *, proxy_provider: Callable[[], dict[str, str] | None] = lambda: None,
+        proxy_secrets: Callable[[], tuple[str, str]] = lambda: ("", ""),
+        log_root: Path | None = None,
     ):
         super().__init__(parent)
         self.site = site
@@ -307,7 +309,13 @@ class SitePage(QWidget):
         )
         layout.addWidget(yandex_panel)
 
-        self.log = ErrorLog(site)
+        self.log = ErrorLog(
+            site, log_root=log_root,
+            secret_provider=lambda: (
+                self.token.text(), self.ftp_user.text(), self.ftp_password.text(),
+                *proxy_secrets(),
+            ),
+        )
         layout.addWidget(self.log, 1)
         self.start_button.clicked.connect(self._start_walk)
         self.stop_button.clicked.connect(self._stop_walk)

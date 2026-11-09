@@ -1,10 +1,12 @@
 """Shared Qt window setup and asynchronous test helpers."""
 
 import os
-from decimal import Decimal
-from threading import Event
+import tempfile
 import time
 import unittest
+from decimal import Decimal
+from pathlib import Path
+from threading import Event
 from unittest.mock import patch
 
 from PySide6.QtTest import QTest
@@ -49,7 +51,9 @@ class UiTestCase(unittest.TestCase):
         cls.app = QApplication.instance() or create_application([])
 
     def setUp(self):
-        self.window = MainWindow()
+        self._log_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self._log_directory.cleanup)
+        self.window = MainWindow(log_root=Path(self._log_directory.name))
 
         class FakeWildberriesClient:
             def __init__(self, *_args, **_kwargs):
