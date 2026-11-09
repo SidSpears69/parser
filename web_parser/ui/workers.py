@@ -38,6 +38,7 @@ class BrowserWalkThread(QThread):
     ozon_direct_started = Signal(str)
     yandex_direct_started = Signal(str)
     ftp_upload_started = Signal()
+    browser_notice = Signal(str)
 
     def __init__(
         self, site: str, installation: BrowserInstallation, links: tuple[ProductLinks, ...],
@@ -106,6 +107,9 @@ class BrowserWalkThread(QThread):
                 proxy=getattr(access, "effective_proxy", self.proxy),
                 playwright=getattr(access, "playwright", None),
             ) as wildberries, ExitStack() as recovery:
+                notice = getattr(access, "launch_notice", None)
+                if notice:
+                    self.browser_notice.emit(notice)
                 direct_image_request: APIRequestContext | None = None
 
                 def direct_images_request() -> APIRequestContext:

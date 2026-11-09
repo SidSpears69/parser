@@ -564,6 +564,57 @@ class BrowserAccessTests(unittest.TestCase):
         self.assertNotIn("long Playwright call log", str(caught.exception))
         self.playwright.stop.assert_called_once_with()
 
+    def test_yandex_uses_temporary_profile_when_saved_profile_is_locked(self):
+        with tempfile.TemporaryDirectory() as folder:
+            profile = Path(folder) / "yandex"
+            context = self.playwright.chromium.launch_persistent_context.return_value
+            context.pages = [self.page]
+            self.playwright.chromium.launch_persistent_context.side_effect = [
+                PlaywrightError(
+                    "Target page has been closed: GPUPersistentCache занят другим процессом (0x20)"
+                ),
+                context,
+            ]
+            installation = BrowserInstallation("Яндекс Браузер", BINARY)
+            with BrowserPageAccess(installation, 0, profile_dir=profile) as access:
+                self.assertIn("временным профилем", access.launch_notice or "")
+                calls = self.playwright.chromium.launch_persistent_context.call_args_list
+                fallback = Path(calls[1].kwargs["user_data_dir"])
+                self.assertEqual(calls[0].kwargs["user_data_dir"], str(profile))
+                self.assertNotEqual(fallback, profile)
+                self.assertTrue(fallback.is_dir())
+            self.assertFalse(fallback.exists())
+            self.assertTrue(profile.is_dir())
+        context.close.assert_called_once_with()
+
+    def test_yandex_does_not_retry_unrelated_launch_failure(self):
+        with tempfile.TemporaryDirectory() as folder:
+            self.playwright.chromium.launch_persistent_context.side_effect = PlaywrightError(
+                "Target page has been closed: incompatible browser"
+            )
+            installation = BrowserInstallation("Яндекс Браузер", BINARY)
+            with self.assertRaisesRegex(BrowserAccessError, "incompatible browser"):
+                with BrowserPageAccess(installation, 0, profile_dir=Path(folder)):
+                    pass
+        self.playwright.chromium.launch_persistent_context.assert_called_once()
+
+    def test_yandex_reports_if_temporary_profile_also_fails(self):
+        with tempfile.TemporaryDirectory() as folder:
+            self.playwright.chromium.launch_persistent_context.side_effect = [
+                PlaywrightError("GPUPersistentCache занят другим процессом (0x20)"),
+                PlaywrightError("long Playwright call log"),
+            ]
+            installation = BrowserInstallation("Яндекс Браузер", BINARY)
+            with self.assertRaisesRegex(BrowserAccessError, "временным профилем тоже не удался") as caught:
+                with BrowserPageAccess(installation, 0, profile_dir=Path(folder)):
+                    pass
+            fallback = Path(
+                self.playwright.chromium.launch_persistent_context.call_args_list[1]
+                .kwargs["user_data_dir"]
+            )
+            self.assertFalse(fallback.exists())
+        self.assertNotIn("long Playwright call log", str(caught.exception))
+
     def test_repeated_persistent_runs_close_old_tabs_in_every_browser(self):
         with tempfile.TemporaryDirectory() as folder:
             for name in BROWSERS:

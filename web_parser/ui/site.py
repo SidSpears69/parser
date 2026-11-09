@@ -649,6 +649,7 @@ class SitePage(QWidget):
         thread.ozon_direct_started.connect(self._walk_ozon_direct_started)
         thread.yandex_direct_started.connect(self._walk_yandex_direct_started)
         thread.ftp_upload_started.connect(self._walk_ftp_upload_started)
+        thread.browser_notice.connect(self._walk_browser_notice)
         thread.finished.connect(self._walk_finished)
         thread.start()
         self._update_links_controls()
@@ -696,6 +697,11 @@ class SitePage(QWidget):
             if direct:
                 detail += "; без прокси"
             self.run_status.setText(f"Загружено {index}/{total}: {marketplace}, товар {product_id}, {detail}.")
+
+    @Slot(str)
+    def _walk_browser_notice(self, message: str) -> None:
+        if not self._shutting_down:
+            self.log.append_error("", "", f"Браузер: {message}")
 
     @Slot(str)
     def _walk_ozon_recovery_started(self, product_id: str) -> None:

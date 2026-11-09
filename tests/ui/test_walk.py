@@ -322,6 +322,38 @@ class WalkTests(UiTestCase):
         self.assertIn("Сборка Firefox", page.log.editor.toPlainText())
         self.assertTrue(page.start_button.isEnabled())
 
+    def test_temporary_profile_notice_is_logged(self):
+        page = self.window.pages[SITES[0]]
+        self._load_links(page, [ProductLinks(
+            "42", "https://ozon.example/42", "https://wb.example/42", "https://ya.example/42",
+        )])
+
+        class NoticeAccess:
+            launch_notice = "Основной профиль занят; обход запущен с временным профилем."
+
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                pass
+
+            @staticmethod
+            def fetch(_url):
+                raise BrowserAccessError("Тестовая ошибка страницы")
+
+            @staticmethod
+            def fetch_wildberries_json(_url):
+                raise BrowserAccessError("Тестовая ошибка страницы")
+
+        with patch("web_parser.ui.workers.BrowserPageAccess", NoticeAccess):
+            page.start_button.click()
+            self._wait_for_walk(page)
+        self.assertIn("временным профилем", page.log.editor.toPlainText())
+        self.assertIn("временным профилем", page.log.file.path.read_text(encoding="utf-8"))
+
     def test_stop_cancels_walk_and_closes_browser_session(self):
         page = self.window.pages[SITES[0]]
         self._load_links(page, [ProductLinks(

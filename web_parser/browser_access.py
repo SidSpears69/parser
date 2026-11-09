@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
+from tempfile import TemporaryDirectory
 import time
 from typing import Callable
 from urllib.parse import parse_qs, quote, quote_plus, urlsplit
@@ -230,6 +231,21 @@ def _chromium_socks_launch_options(
     }
 
 
+def _profile_locked(error: PlaywrightError) -> bool:
+    """Recognize a browser process that cannot use an occupied profile."""
+    message = str(error).casefold()
+    if "profile in use" in message or "profile is in use" in message:
+        return True
+    if "singletonlock" in message:
+        return True
+    return "gpupersistentcache" in message and any(
+        clue in message for clue in (
+            "занят другим процессом", "используется другим процессом",
+            "being used by another process", "0x20",
+        )
+    )
+
+
 class BrowserPageAccess:
     """Keep one Playwright context for a sequence of URLs in one worker thread.
 
@@ -270,6 +286,8 @@ class BrowserPageAccess:
         self._page: Page | None = None
         self._navigated_once = False
         self._proxy_relay: Socks5AuthRelay | None = None
+        self._temporary_profile: TemporaryDirectory | None = None
+        self.launch_notice: str | None = None
 
     @property
     def playwright(self) -> Playwright:
@@ -338,13 +356,39 @@ class BrowserPageAccess:
                     self.profile_dir.mkdir(parents=True, exist_ok=True)
                     if name == "Яндекс Браузер":
                         _archive_yandex_saved_tabs(self.profile_dir)
-                    self._context = self._playwright.chromium.launch_persistent_context(
-                        user_data_dir=str(self.profile_dir), executable_path=str(binary),
-                        headless=self.headless, locale="ru-RU",
-                        chromium_sandbox=True,
-                        timeout=_BROWSER_LAUNCH_TIMEOUT_MS,
-                        **proxy_options, **chromium_proxy_options,
-                    )
+                    chromium = self._playwright.chromium
+
+                    def launch_persistent(profile: str) -> BrowserContext:
+                        return chromium.launch_persistent_context(
+                            user_data_dir=profile, executable_path=str(binary),
+                            headless=self.headless, locale="ru-RU",
+                            chromium_sandbox=True,
+                            timeout=_BROWSER_LAUNCH_TIMEOUT_MS,
+                            **proxy_options, **chromium_proxy_options,
+                        )
+
+                    try:
+                        self._context = launch_persistent(str(self.profile_dir))
+                    except PlaywrightError as error:
+                        if name != "Яндекс Браузер" or not _profile_locked(error):
+                            raise
+                        self._temporary_profile = TemporaryDirectory(
+                            prefix="web-parser-yandex-profile-", ignore_cleanup_errors=True,
+                        )
+                        try:
+                            self._context = launch_persistent(self._temporary_profile.name)
+                        except PlaywrightError as retry_error:
+                            raise BrowserAccessError(
+                                "Основной профиль Яндекс Браузера занят другим процессом, "
+                                "а запуск с временным профилем тоже не удался. "
+                                "Закройте окно Яндекс Браузера, запущенное парсером, "
+                                "и проверьте оставшиеся процессы браузера."
+                            ) from retry_error
+                        self.launch_notice = (
+                            "Основной профиль Яндекс Браузера занят другим процессом: "
+                            f"{self.profile_dir}. Обход запущен с временным профилем "
+                            "без сохранённых cookies."
+                        )
             if self._context is None and self._browser is not None:
                 self._context = self._browser.new_context(locale="ru-RU")
             if self._context is None:
@@ -654,6 +698,7 @@ class BrowserPageAccess:
         playwright = self._playwright if self._owns_playwright else None
         self._playwright = None
         proxy_relay, self._proxy_relay = self._proxy_relay, None
+        temporary_profile, self._temporary_profile = self._temporary_profile, None
         self._page = None
         self._navigated_once = False
         first_error: PlaywrightError | OSError | None = None
@@ -685,6 +730,12 @@ class BrowserPageAccess:
         if proxy_relay is not None:
             try:
                 proxy_relay.close()
+            except OSError as error:
+                if first_error is None:
+                    first_error = error
+        if temporary_profile is not None:
+            try:
+                temporary_profile.cleanup()
             except OSError as error:
                 if first_error is None:
                     first_error = error
