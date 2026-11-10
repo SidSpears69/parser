@@ -6,9 +6,10 @@ from collections import deque
 from pathlib import Path
 
 from web_parser.config import SITES
+from web_parser.paths import ARTIFACT_ROOT
 
 
-DEFAULT_LOG_ROOT = Path(__file__).resolve().parent.parent / "artifacts" / "logs"
+DEFAULT_LOG_ROOT = ARTIFACT_ROOT / "logs"
 MAX_LOG_BYTES = 5 * 1024 * 1024
 LOG_BACKUPS = 3
 

@@ -41,6 +41,15 @@ def create_application(argv: list[str] | None = None) -> QApplication:
 
 
 def main() -> int:
+    if "--self-test" in sys.argv:
+        from web_parser.self_test import run_self_test
+
+        args = sys.argv[1:]
+        browser_index = args.index("--browser") if "--browser" in args else -1
+        if browser_index >= 0 and browser_index + 1 >= len(args):
+            raise ValueError("После --browser укажите название браузера.")
+        browser_name = args[browser_index + 1] if browser_index >= 0 else None
+        return run_self_test(browser_name)
     app = create_application()
     window = MainWindow()
     window.show()

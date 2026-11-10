@@ -17,9 +17,10 @@ from playwright.sync_api import APIRequestContext, Error as PlaywrightError
 
 from web_parser.config import SITES
 from web_parser.network_errors import request_failure_reason
+from web_parser.paths import ARTIFACT_ROOT
 
 
-DEFAULT_IMAGE_ROOT = Path(__file__).resolve().parent.parent / "artifacts"
+DEFAULT_IMAGE_ROOT = ARTIFACT_ROOT
 _MAX_IMAGE_BYTES = 30 * 1024 * 1024
 _REQUEST_TIMEOUT_MS = 20_000
 _ATTEMPTS = 3
