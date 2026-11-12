@@ -587,6 +587,22 @@ class BrowserAccessTests(unittest.TestCase):
             self.assertTrue(profile.is_dir())
         context.close.assert_called_once_with()
 
+    def test_yandex_retries_target_closed_without_readable_lock_message(self):
+        with tempfile.TemporaryDirectory() as folder:
+            context = self.playwright.chromium.launch_persistent_context.return_value
+            context.pages = [self.page]
+            self.playwright.chromium.launch_persistent_context.side_effect = [
+                PlaywrightError(
+                    "BrowserType.launch_persistent_context: "
+                    "Target page, context or browser has been closed"
+                ),
+                context,
+            ]
+            installation = BrowserInstallation("Яндекс Браузер", BINARY)
+            with BrowserPageAccess(installation, 0, profile_dir=Path(folder)) as access:
+                self.assertIn("временным профилем", access.launch_notice or "")
+        self.assertEqual(self.playwright.chromium.launch_persistent_context.call_count, 2)
+
     def test_yandex_does_not_retry_unrelated_launch_failure(self):
         with tempfile.TemporaryDirectory() as folder:
             self.playwright.chromium.launch_persistent_context.side_effect = PlaywrightError(
@@ -598,22 +614,48 @@ class BrowserAccessTests(unittest.TestCase):
                     pass
         self.playwright.chromium.launch_persistent_context.assert_called_once()
 
-    def test_yandex_reports_if_temporary_profile_also_fails(self):
+    def test_yandex_uses_clean_session_if_temporary_profile_fails(self):
         with tempfile.TemporaryDirectory() as folder:
             self.playwright.chromium.launch_persistent_context.side_effect = [
                 PlaywrightError("GPUPersistentCache занят другим процессом (0x20)"),
-                PlaywrightError("long Playwright call log"),
+                PlaywrightError("temporary profile launch failed"),
             ]
+            self.context.pages = []
             installation = BrowserInstallation("Яндекс Браузер", BINARY)
-            with self.assertRaisesRegex(BrowserAccessError, "временным профилем тоже не удался") as caught:
-                with BrowserPageAccess(installation, 0, profile_dir=Path(folder)):
+            with BrowserPageAccess(installation, 0, profile_dir=Path(folder)) as access:
+                self.assertIn("чистом сеансе", access.launch_notice or "")
+                fallback = Path(
+                    self.playwright.chromium.launch_persistent_context.call_args_list[1]
+                    .kwargs["user_data_dir"]
+                )
+            self.playwright.chromium.launch.assert_called_once_with(
+                executable_path=str(BINARY), headless=False,
+                chromium_sandbox=True, timeout=20_000,
+            )
+            self.assertFalse(fallback.exists())
+
+    def test_yandex_reports_all_launch_failures_without_proxy_secret(self):
+        with tempfile.TemporaryDirectory() as folder:
+            self.playwright.chromium.launch_persistent_context.side_effect = [
+                PlaywrightError("GPUPersistentCache занят другим процессом (0x20)"),
+                PlaywrightError("temporary profile launch failed"),
+            ]
+            self.playwright.chromium.launch.side_effect = PlaywrightError("proxy secret rejected")
+            installation = BrowserInstallation("Яндекс Браузер", BINARY)
+            proxy = {
+                "server": "http://proxy.example:8080", "username": "person", "password": "secret",
+            }
+            with self.assertRaisesRegex(BrowserAccessError, "чистый сеанс") as caught:
+                with BrowserPageAccess(installation, 0, profile_dir=Path(folder), proxy=proxy):
                     pass
             fallback = Path(
                 self.playwright.chromium.launch_persistent_context.call_args_list[1]
                 .kwargs["user_data_dir"]
             )
             self.assertFalse(fallback.exists())
-        self.assertNotIn("long Playwright call log", str(caught.exception))
+        self.assertIn("temporary profile launch failed", str(caught.exception))
+        self.assertIn("[данные прокси скрыты]", str(caught.exception))
+        self.assertNotIn("secret", str(caught.exception))
 
     def test_repeated_persistent_runs_close_old_tabs_in_every_browser(self):
         with tempfile.TemporaryDirectory() as folder:

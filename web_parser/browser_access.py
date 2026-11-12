@@ -246,6 +246,15 @@ def _profile_locked(error: PlaywrightError) -> bool:
     )
 
 
+def _retry_yandex_profile(error: PlaywrightError) -> bool:
+    """Yandex can exit on a locked profile without a readable lock message."""
+    message = str(error).casefold()
+    return _profile_locked(error) or (
+        "launch_persistent_context" in message
+        and "target page, context or browser has been closed" in message
+    )
+
+
 class BrowserPageAccess:
     """Keep one Playwright context for a sequence of URLs in one worker thread.
 
@@ -370,7 +379,7 @@ class BrowserPageAccess:
                     try:
                         self._context = launch_persistent(str(self.profile_dir))
                     except PlaywrightError as error:
-                        if name != "Яндекс Браузер" or not _profile_locked(error):
+                        if name != "Яндекс Браузер" or not _retry_yandex_profile(error):
                             raise
                         self._temporary_profile = TemporaryDirectory(
                             prefix="web-parser-yandex-profile-", ignore_cleanup_errors=True,
@@ -378,17 +387,29 @@ class BrowserPageAccess:
                         try:
                             self._context = launch_persistent(self._temporary_profile.name)
                         except PlaywrightError as retry_error:
-                            raise BrowserAccessError(
-                                "Основной профиль Яндекс Браузера занят другим процессом, "
-                                "а запуск с временным профилем тоже не удался. "
-                                "Закройте окно Яндекс Браузера, запущенное парсером, "
-                                "и проверьте оставшиеся процессы браузера."
-                            ) from retry_error
-                        self.launch_notice = (
-                            "Основной профиль Яндекс Браузера занят другим процессом: "
-                            f"{self.profile_dir}. Обход запущен с временным профилем "
-                            "без сохранённых cookies."
-                        )
+                            try:
+                                self._browser = chromium.launch(
+                                    executable_path=str(binary), headless=self.headless,
+                                    chromium_sandbox=True, timeout=_BROWSER_LAUNCH_TIMEOUT_MS,
+                                    **proxy_options, **chromium_proxy_options,
+                                )
+                            except PlaywrightError as clean_error:
+                                raise BrowserAccessError(
+                                    "Не удалось запустить Яндекс Браузер. "
+                                    f"Основной профиль: {self._launch_problem(error)}; "
+                                    f"временный профиль: {self._launch_problem(retry_error)}; "
+                                    f"чистый сеанс: {self._launch_problem(clean_error)}."
+                                ) from clean_error
+                            self.launch_notice = (
+                                "Основной и временный профили Яндекс Браузера не открылись; "
+                                "обход запущен в чистом сеансе без сохранённых cookies."
+                            )
+                        else:
+                            self.launch_notice = (
+                                "Основной профиль Яндекс Браузера не открылся: "
+                                f"{self.profile_dir}. Обход запущен с временным профилем "
+                                "без сохранённых cookies."
+                            )
             if self._context is None and self._browser is not None:
                 self._context = self._browser.new_context(locale="ru-RU")
             if self._context is None:
@@ -690,6 +711,10 @@ class BrowserPageAccess:
                     if secret:
                         message = message.replace(secret, "[данные прокси скрыты]")
         return message
+
+    def _launch_problem(self, error: PlaywrightError) -> str:
+        message = self._safe_error(error).strip()
+        return message.splitlines()[0][:240] if message else type(error).__name__
 
     def close(self) -> None:
         """Release resources in reverse order, including after partial startup."""

@@ -1,17 +1,34 @@
 param(
-    [string]$Browser = ''
+    [string]$Browser = '',
+    [string]$BuildChannel = ''
 )
 
 $ErrorActionPreference = 'Stop'
 $projectRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 $python = Join-Path $projectRoot '.venv\Scripts\python.exe'
-$exe = Join-Path $projectRoot 'dist\WebParser\WebParser.exe'
-$report = Join-Path $projectRoot 'dist\WebParser\artifacts\self-test.txt'
-$outputFolder = Join-Path $projectRoot 'dist\WebParser'
+if ($BuildChannel -and $BuildChannel -notmatch '^[A-Za-z0-9_-]+$') {
+    throw 'BuildChannel must contain only letters, digits, hyphens or underscores.'
+}
+$distRoot = Join-Path $projectRoot 'dist'
+if ($BuildChannel) { $distRoot = Join-Path $distRoot $BuildChannel }
+$outputFolder = Join-Path $distRoot 'WebParser'
+$exe = Join-Path $outputFolder 'WebParser.exe'
+$report = Join-Path $outputFolder 'artifacts\self-test.txt'
 $originalPath = $env:Path
 
 if (-not (Test-Path -LiteralPath $python -PathType Leaf)) {
     throw 'Create .venv with Python 3.14 and install requirements.txt before building.'
+}
+
+$rootPrefix = $projectRoot.TrimEnd('\') + '\'
+foreach ($candidate in @((Split-Path -Parent $distRoot), $distRoot, $outputFolder)) {
+    if (Test-Path -LiteralPath $candidate) {
+        $resolved = (Resolve-Path -LiteralPath $candidate).Path
+        if (-not $resolved.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase) -and
+            $resolved -ne $projectRoot) {
+            throw "Build output resolves outside the project: $resolved"
+        }
+    }
 }
 
 Push-Location $projectRoot
@@ -23,7 +40,7 @@ try {
             -Recurse -File -ErrorAction SilentlyContinue |
             Where-Object { $_.FullName -ne $report }
         if ($extraEntries -or $savedData) {
-            throw 'Move saved configuration, images and logs out of dist\WebParser before rebuilding.'
+            throw "Move saved configuration, images and logs out of $outputFolder before rebuilding."
         }
     }
 
@@ -43,7 +60,7 @@ try {
 
     & $python -m PyInstaller --noconfirm --clean --onedir --windowed `
         --name WebParser --collect-all playwright --collect-all playwright_stealth `
-        --distpath dist --workpath build main.py
+        --distpath $distRoot --workpath build main.py
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $exe -PathType Leaf)) {
         throw 'Could not build WebParser.exe.'
     }
