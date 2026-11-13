@@ -96,7 +96,7 @@ class SchedulerTests(UiTestCase):
             LINKS[0].ozon_url, LINKS[0].wildberries_url, LINKS[0].yandex_market_url,
         ])
         self.assertTrue(RecordingAccess.created_options)
-        self.assertTrue(all(options["headless"] for options in RecordingAccess.created_options))
+        self.assertTrue(all(not options["headless"] for options in RecordingAccess.created_options))
         self.assertEqual(self.window.pages[SITES[1]].product_links, ())
         self.assertIn("Загружено: 3", page.run_status.text())
 
@@ -120,7 +120,7 @@ class SchedulerTests(UiTestCase):
         self.assertEqual(fetch.call_count, 1)
         self.assertEqual(len(RecordingAccess.visited), 3)
         self.assertTrue(RecordingAccess.created_options)
-        self.assertTrue(all(options["headless"] for options in RecordingAccess.created_options))
+        self.assertTrue(all(not options["headless"] for options in RecordingAccess.created_options))
         self.assertIn("Загружено: 3", page.run_status.text())
 
     def test_schedule_reconfigures_when_time_changes(self):
