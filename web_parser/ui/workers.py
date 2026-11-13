@@ -44,12 +44,14 @@ class BrowserWalkThread(QThread):
         self, site: str, installation: BrowserInstallation, links: tuple[ProductLinks, ...],
         pause_seconds: int, parent=None, *, proxy: dict[str, str] | None = None,
         ftp_settings: dict[str, object] | None = None,
+        headless: bool = False,
     ) -> None:
         super().__init__(parent)
         self.site = site
         self.installation = installation
         self.links = links
         self.pause_seconds = pause_seconds
+        self.headless = headless
         self.proxy = proxy.copy() if proxy is not None else None
         self.ftp_settings = ftp_settings.copy() if ftp_settings is not None else None
         self.loaded = 0
@@ -88,7 +90,7 @@ class BrowserWalkThread(QThread):
                 f"Не удалось создать временный профиль {marketplace}."
             ) from error
         return recovery.enter_context(BrowserPageAccess(
-            self.installation, self.pause_seconds, headless=False,
+            self.installation, self.pause_seconds, headless=self.headless,
             sleep=self._pause, cancel_requested=self._stop_event.is_set,
             profile_dir=Path(folder), proxy=proxy,
             playwright=getattr(original, "playwright", None),
@@ -99,7 +101,7 @@ class BrowserWalkThread(QThread):
         index = 0
         try:
             with BrowserPageAccess(
-                self.installation, self.pause_seconds, headless=False,
+                self.installation, self.pause_seconds, headless=self.headless,
                 sleep=self._pause, cancel_requested=self._stop_event.is_set,
                 profile_dir=browser_profile_dir(self.site, self.installation.name),
                 proxy=self.proxy,

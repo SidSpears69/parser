@@ -640,7 +640,12 @@ class BrowserAccessTests(unittest.TestCase):
                 PlaywrightError("GPUPersistentCache занят другим процессом (0x20)"),
                 PlaywrightError("temporary profile launch failed"),
             ]
-            self.playwright.chromium.launch.side_effect = PlaywrightError("proxy secret rejected")
+            self.playwright.chromium.launch.side_effect = PlaywrightError(
+                "BrowserType.launch: Target page, context or browser has been closed\n"
+                "Browser logs:\n"
+                "[pid=123][err] ERROR: proxy secret rejected\n"
+                "[pid=123] <process did exit: exitCode=1, signal=null>"
+            )
             installation = BrowserInstallation("Яндекс Браузер", BINARY)
             proxy = {
                 "server": "http://proxy.example:8080", "username": "person", "password": "secret",
@@ -654,6 +659,8 @@ class BrowserAccessTests(unittest.TestCase):
             )
             self.assertFalse(fallback.exists())
         self.assertIn("temporary profile launch failed", str(caught.exception))
+        self.assertIn("stderr: ERROR: proxy [данные прокси скрыты] rejected", str(caught.exception))
+        self.assertIn("exitCode=1", str(caught.exception))
         self.assertIn("[данные прокси скрыты]", str(caught.exception))
         self.assertNotIn("secret", str(caught.exception))
 

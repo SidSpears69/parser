@@ -714,7 +714,18 @@ class BrowserPageAccess:
 
     def _launch_problem(self, error: PlaywrightError) -> str:
         message = self._safe_error(error).strip()
-        return message.splitlines()[0][:240] if message else type(error).__name__
+        if not message:
+            return type(error).__name__
+        lines = message.splitlines()
+        parts = [lines[0].split(": ", 1)[-1].strip()]
+        stderr = next((line.split("[err]", 1)[1].strip() for line in lines if "[err]" in line), "")
+        if stderr and "\ufffd" not in stderr:
+            parts.append(f"stderr: {stderr[:180]}")
+        exit_line = next((line for line in lines if "process did exit:" in line), "")
+        if "exitCode=" in exit_line:
+            exit_code = exit_line.split("exitCode=", 1)[1].split(",", 1)[0].strip()
+            parts.append(f"exitCode={exit_code[:12]}")
+        return "; ".join(parts)[:400]
 
     def close(self) -> None:
         """Release resources in reverse order, including after partial startup."""

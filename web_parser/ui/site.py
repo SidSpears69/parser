@@ -476,7 +476,7 @@ class SitePage(QWidget):
         if self._pending_scheduled_walk:
             self._pending_scheduled_walk = False
             if self._product_links:
-                self._start_walk()
+                self._begin_walk(headless=True)
             else:
                 self.log.append_error("", "", "Расписание анализа: ссылки не загружены; запуск пропущен.")
         self.links_fetch_finished.emit()
@@ -612,6 +612,9 @@ class SitePage(QWidget):
         )
 
     def _start_walk(self) -> None:
+        self._begin_walk(headless=False)
+
+    def _begin_walk(self, *, headless: bool) -> None:
         installation = self._selected_installation()
         if (
             installation is None or not self._product_links or self._walk_thread is not None
@@ -626,7 +629,7 @@ class SitePage(QWidget):
             return
         thread = BrowserWalkThread(
             self.site, installation, self._product_links, self.pause.value(), self,
-            proxy=proxy, ftp_settings=self.settings()["ftp"],
+            proxy=proxy, ftp_settings=self.settings()["ftp"], headless=headless,
         )
         self._walk_thread = thread
         self._clear_ozon_results()
@@ -636,7 +639,9 @@ class SitePage(QWidget):
         self.ftp_status.setText("Ожидание завершения сбора данных…")
         self.state_label.setText("Запуск…")
         self.run_status.setText(
-            f"Запускается {installation.name}; заданий в очереди: {len(self._product_links) * 3}."
+            f"Запускается {installation.name}"
+            f"{' в фоновом режиме' if headless else ''}; "
+            f"заданий в очереди: {len(self._product_links) * 3}."
         )
         thread.page_started.connect(self._walk_page_started)
         thread.page_loaded.connect(self._walk_page_loaded)
@@ -924,7 +929,7 @@ class SitePage(QWidget):
             self._pending_scheduled_walk = True
             self._fetch_product_links()
             return
-        self._start_walk()
+        self._begin_walk(headless=True)
         if self._walk_thread is None:
             self.log.append_error("", "", "Расписание анализа: запуск обхода не удался.")
 

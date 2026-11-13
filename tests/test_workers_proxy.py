@@ -30,13 +30,13 @@ class WorkerProxyTests(unittest.TestCase):
         parsed_routes = []
 
         class FakeAccess:
-            def __init__(self, *_args, profile_dir, proxy, **_options):
+            def __init__(self, *_args, profile_dir, proxy, headless, **_options):
                 self.profile_dir = profile_dir
                 self.direct = profile_dir.name.startswith("web-parser-yandex-direct-")
                 self.playwright = object()
                 self.effective_proxy = proxy
                 self.page = SimpleNamespace(request="direct" if self.direct else "proxy")
-                profiles.append((profile_dir, proxy))
+                profiles.append((profile_dir, proxy, headless))
 
             def __enter__(self):
                 return self
@@ -78,7 +78,7 @@ class WorkerProxyTests(unittest.TestCase):
 
         worker = BrowserWalkThread(
             "sail-master.ru", BrowserInstallation("Google Chrome", Path(__file__)),
-            links, 0, proxy=upstream_proxy,
+            links, 0, proxy=upstream_proxy, headless=True,
         )
         recoveries = []
         loaded = []
@@ -101,6 +101,7 @@ class WorkerProxyTests(unittest.TestCase):
         self.assertEqual(len(profiles), 2)
         self.assertEqual(profiles[0][1], upstream_proxy)
         self.assertIsNone(profiles[1][1])
+        self.assertTrue(all(item[2] for item in profiles))
         self.assertFalse(profiles[1][0].exists())
         self.assertEqual(parsed_routes, [True, True])
         self.assertEqual(
