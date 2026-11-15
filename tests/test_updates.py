@@ -17,7 +17,7 @@ class UpdateTests(TestCase):
     @staticmethod
     def _folder() -> Path:
         folder = Path.cwd() / ".tmp" / f"update-test-{uuid4().hex}"
-        folder.mkdir()
+        folder.mkdir(parents=True)
         return folder
 
     def setUp(self) -> None:
