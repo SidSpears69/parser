@@ -1,6 +1,7 @@
 """Main window and cross-site configuration controls."""
 
 from pathlib import Path
+import subprocess
 
 from PySide6.QtCore import QTimer, Slot
 from PySide6.QtWidgets import (
@@ -11,7 +12,9 @@ from PySide6.QtWidgets import (
 from web_parser import config
 from web_parser.browser_discovery import discover_browsers
 from web_parser.ui.site import SitePage
+from web_parser.ui.update import UpdateThread
 from web_parser.ui.widgets import ClickableCursorFilter, field, form, label, section
+from web_parser.updates import Release, installed_version, is_newer
 
 SITES = config.SITES
 
@@ -36,6 +39,9 @@ class MainWindow(QMainWindow):
         title.addWidget(label("Сбор данных с маркетплейсов", "subtitle"))
         header.addLayout(title)
         header.addStretch()
+        self.update_button = QPushButton("Проверить обновления")
+        self.update_button.setObjectName("checkUpdates")
+        header.addWidget(self.update_button)
         header.addWidget(label("4 сайта", "badge"))
         layout.addLayout(header)
 
@@ -77,6 +83,12 @@ class MainWindow(QMainWindow):
         self.tabs.setDocumentMode(True)
         self._browsers_scanned = False
         self._close_pending = False
+        self._update_thread: UpdateThread | None = None
+        self._update_release: Release | None = None
+        self._update_installer: str | None = None
+        self._pending_installer: str | None = None
+        self._update_error: str | None = None
+        self._current_version: str | None = None
         self.pages: dict[str, SitePage] = {}
         for site in SITES:
             page = SitePage(
@@ -93,11 +105,14 @@ class MainWindow(QMainWindow):
             self.tabs.addTab(scroll, site)
             page.refresh_browsers_requested.connect(self._refresh_browsers)
             page.walk_finished.connect(self._resume_close)
+            page.walk_finished.connect(self._install_when_idle)
             page.walk_state_changed.connect(self._update_config_controls)
             page.links_fetch_finished.connect(self._resume_close)
+            page.links_fetch_finished.connect(self._install_when_idle)
         layout.addWidget(self.tabs, 1)
         self.save_config_button.clicked.connect(self._choose_save_config)
         self.load_config_button.clicked.connect(self._choose_load_config)
+        self.update_button.clicked.connect(self._check_updates)
         self._refresh_browsers()
         self._clickable_cursor_filter = ClickableCursorFilter(self)
         clickable_widgets = (
@@ -125,8 +140,11 @@ class MainWindow(QMainWindow):
             page for page in self.pages.values()
             if page.walk_pending or page.links_fetch_pending
         ]
-        if busy:
+        update_running = self._update_thread is not None and self._update_thread.isRunning()
+        if busy or update_running:
             event.ignore()
+            if update_running and self._update_thread is not None:
+                self._update_thread.requestInterruption()
             if not self._close_pending:
                 self._close_pending = True
                 self.statusBar().showMessage("Завершаются фоновые операции перед закрытием приложения…")
@@ -144,7 +162,7 @@ class MainWindow(QMainWindow):
         if self._close_pending and all(
                 not page.walk_pending and not page.links_fetch_pending
                 for page in self.pages.values()
-        ):
+        ) and (self._update_thread is None or not self._update_thread.isRunning()):
             self._close_pending = False
             QTimer.singleShot(0, self.close)
 
@@ -215,3 +233,112 @@ class MainWindow(QMainWindow):
         editable = not any(page.walk_pending for page in self.pages.values()) and not self._close_pending
         self.load_config_button.setEnabled(editable)
         self.proxy_section.setEnabled(editable)
+        self.update_button.setEnabled(
+            editable and self._update_thread is None and self._pending_installer is None
+        )
+
+    @Slot()
+    def _check_updates(self) -> None:
+        current = installed_version()
+        if current is None:
+            QMessageBox.information(
+                self, "Обновления", "Обновление по кнопке доступно после установки выпуска приложения."
+            )
+            return
+        if any(page.walk_pending or page.links_fetch_pending for page in self.pages.values()):
+            QMessageBox.information(self, "Обновления", "Дождитесь завершения текущего прогона.")
+            return
+        self._current_version = current
+        self._start_update_thread(None)
+
+    def _start_update_thread(self, release: Release | None) -> None:
+        self._update_release = None
+        self._update_installer = None
+        self._update_error = None
+        thread = UpdateThread(release, self)
+        self._update_thread = thread
+        thread.release_found.connect(self._release_found)
+        thread.installer_ready.connect(self._installer_ready)
+        thread.download_progress.connect(self._download_progress)
+        thread.failed.connect(self._update_failed)
+        thread.finished.connect(self._update_finished)
+        self.update_button.setEnabled(False)
+        self.statusBar().showMessage(
+            "Скачивание обновления…" if release is not None else "Проверка обновлений…"
+        )
+        thread.start()
+
+    @Slot(object)
+    def _release_found(self, release: Release) -> None:
+        self._update_release = release
+
+    @Slot(str)
+    def _installer_ready(self, path: str) -> None:
+        self._update_installer = path
+
+    @Slot(int, int)
+    def _download_progress(self, received: int, total: int) -> None:
+        self.statusBar().showMessage(f"Скачивание обновления: {received * 100 // total}%")
+
+    @Slot(str)
+    def _update_failed(self, message: str) -> None:
+        self._update_error = message
+
+    @Slot()
+    def _update_finished(self) -> None:
+        thread = self._update_thread
+        if thread is None:
+            return
+        was_download = thread.release is not None
+        self._update_thread = None
+        thread.deleteLater()
+        if self._close_pending:
+            self._resume_close()
+            return
+        self.update_button.setEnabled(True)
+        if self._update_error:
+            QMessageBox.warning(self, "Не удалось обновить приложение", self._update_error)
+            return
+        if was_download:
+            if self._update_installer:
+                self._launch_installer(self._update_installer)
+            return
+        release = self._update_release
+        current = self._current_version
+        if release is None or current is None:
+            return
+        if not is_newer(release, current):
+            QMessageBox.information(self, "Обновления", f"Установлена последняя версия: {current}.")
+            self.statusBar().showMessage("Обновлений нет")
+            return
+        answer = QMessageBox.question(
+            self, "Доступно обновление",
+            f"Версия {release.version} доступна (установлена {current}). "
+            "Скачать и установить? Приложение закроется перед установкой.",
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            self._start_update_thread(release)
+
+    def _launch_installer(self, path: str) -> None:
+        if any(page.walk_pending or page.links_fetch_pending for page in self.pages.values()):
+            self._pending_installer = path
+            self.update_button.setEnabled(False)
+            self.statusBar().showMessage("Обновление загружено; установка начнётся после прогона.")
+            return
+        try:
+            subprocess.Popen([path, "/SP-", "/NORESTART", "/NORESTARTAPPLICATIONS"])
+        except OSError as error:
+            QMessageBox.warning(self, "Не удалось запустить установщик", str(error))
+            return
+        self.statusBar().showMessage("Установщик запущен. Приложение закрывается…")
+        QTimer.singleShot(0, self.close)
+
+    @Slot()
+    def _install_when_idle(self) -> None:
+        if self._pending_installer is None or self._close_pending:
+            return
+        path = self._pending_installer
+        if any(page.walk_pending or page.links_fetch_pending for page in self.pages.values()):
+            return
+        self._pending_installer = None
+        self._launch_installer(path)

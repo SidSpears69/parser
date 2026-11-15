@@ -13,14 +13,15 @@ from web_parser.paths import ARTIFACT_ROOT
 from web_parser.ui import MainWindow
 
 
-def run_self_test(browser_name: str | None = None) -> int:
+def run_self_test(browser_name: str | None = None, *, headless: bool = False) -> int:
     """Check Qt, Playwright driver, and one visible browser without network access."""
     report_path = ARTIFACT_ROOT / "self-test.txt"
     lines: list[str] = []
     try:
         application = create_application(["WebParser.exe"])
         window = MainWindow()
-        window.show()
+        if not headless:
+            window.show()
         application.processEvents()
         lines.append("Qt window: OK")
         available = discover_browsers()
@@ -38,7 +39,7 @@ def run_self_test(browser_name: str | None = None) -> int:
                 )
             with TemporaryDirectory(prefix="web-parser-self-test-") as folder:
                 with BrowserPageAccess(
-                    installation, 0, headless=False, profile_dir=Path(folder),
+                    installation, 0, headless=headless, profile_dir=Path(folder),
                     playwright=playwright,
                 ):
                     application.processEvents()

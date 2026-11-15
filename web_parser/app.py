@@ -1,9 +1,15 @@
 import os
+from pathlib import Path
 import sys
 
 from PySide6.QtCore import QLocale
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QApplication
+
+if getattr(sys, "frozen", False):
+    bundled_browsers = Path(sys.executable).resolve().parent / "ms-playwright"
+    if bundled_browsers.is_dir():
+        os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(bundled_browsers)
 
 from web_parser.ui import MainWindow
 from web_parser.theme import STYLESHEET
@@ -49,7 +55,7 @@ def main() -> int:
         if browser_index >= 0 and browser_index + 1 >= len(args):
             raise ValueError("После --browser укажите название браузера.")
         browser_name = args[browser_index + 1] if browser_index >= 0 else None
-        return run_self_test(browser_name)
+        return run_self_test(browser_name, headless="--headless" in args)
     app = create_application()
     window = MainWindow()
     window.show()

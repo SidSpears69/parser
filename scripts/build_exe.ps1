@@ -1,6 +1,9 @@
 param(
     [string]$Browser = '',
-    [string]$BuildChannel = ''
+    [string]$BuildChannel = '',
+    [string]$Version = '0.0.0',
+    [switch]$HeadlessSelfTest,
+    [switch]$BundleFirefox
 )
 
 $ErrorActionPreference = 'Stop'
@@ -9,12 +12,17 @@ $python = Join-Path $projectRoot '.venv\Scripts\python.exe'
 if ($BuildChannel -and $BuildChannel -notmatch '^[A-Za-z0-9_-]+$') {
     throw 'BuildChannel must contain only letters, digits, hyphens or underscores.'
 }
+if ($Version -notmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') {
+    throw 'Version must have the form 1.2.3.'
+}
 $distRoot = Join-Path $projectRoot 'dist'
 if ($BuildChannel) { $distRoot = Join-Path $distRoot $BuildChannel }
 $outputFolder = Join-Path $distRoot 'WebParser'
 $exe = Join-Path $outputFolder 'WebParser.exe'
 $report = Join-Path $outputFolder 'artifacts\self-test.txt'
 $originalPath = $env:Path
+$originalQpaPlatform = $env:QT_QPA_PLATFORM
+$originalPlaywrightBrowsers = $env:PLAYWRIGHT_BROWSERS_PATH
 
 if (-not (Test-Path -LiteralPath $python -PathType Leaf)) {
     throw 'Create .venv with Python 3.14 and install requirements.txt before building.'
@@ -35,7 +43,7 @@ Push-Location $projectRoot
 try {
     if (Test-Path -LiteralPath $outputFolder -PathType Container) {
         $extraEntries = Get-ChildItem -LiteralPath $outputFolder -Force |
-            Where-Object { $_.Name -notin @('_internal', 'WebParser.exe', 'artifacts') }
+            Where-Object { $_.Name -notin @('_internal', 'WebParser.exe', 'artifacts', 'version.json', 'ms-playwright') }
         $savedData = Get-ChildItem -LiteralPath (Join-Path $outputFolder 'artifacts') `
             -Recurse -File -ErrorAction SilentlyContinue |
             Where-Object { $_.FullName -ne $report }
@@ -65,7 +73,23 @@ try {
         throw 'Could not build WebParser.exe.'
     }
 
+    [IO.File]::WriteAllText(
+        (Join-Path $outputFolder 'version.json'),
+        ('{"version":"' + $Version + '"}'),
+        [Text.UTF8Encoding]::new($false)
+    )
+
+    if ($BundleFirefox) {
+        $env:PLAYWRIGHT_BROWSERS_PATH = Join-Path $outputFolder 'ms-playwright'
+        & $python -m playwright install firefox
+        if ($LASTEXITCODE -ne 0) { throw 'Could not bundle Playwright Firefox.' }
+    }
+
     $checkArguments = '--self-test'
+    if ($HeadlessSelfTest) {
+        $checkArguments += ' --headless'
+        $env:QT_QPA_PLATFORM = 'offscreen'
+    }
     if ($Browser) {
         if ($Browser.Contains('"')) { throw 'Browser name must not contain a quotation mark.' }
         $checkArguments += ' --browser "' + $Browser + '"'
@@ -84,5 +108,7 @@ try {
     Write-Output "Built and checked: $exe"
 } finally {
     $env:Path = $originalPath
+    $env:QT_QPA_PLATFORM = $originalQpaPlatform
+    $env:PLAYWRIGHT_BROWSERS_PATH = $originalPlaywrightBrowsers
     Pop-Location
 }

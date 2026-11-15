@@ -1,0 +1,67 @@
+name: Windows release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]*.[0-9]*.[0-9]*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.14'
+          architecture: x64
+
+      - name: Validate release tag
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF_NAME -notmatch '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') {
+            throw 'Release tag must have the form v1.2.3.'
+          }
+
+      - name: Install Python dependencies and Firefox
+        shell: pwsh
+        run: |
+          python -m venv .venv
+          .\.venv\Scripts\python.exe -m pip install --disable-pip-version-check -r requirements.txt -r requirements-build.txt
+          .\.venv\Scripts\python.exe -m playwright install firefox
+
+      - name: Run tests
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: .\.venv\Scripts\python.exe -m unittest discover -s tests -v
+
+      - name: Build and check executable
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF_NAME.Substring(1)
+          .\scripts\build_exe.ps1 -Version $version -Browser 'Mozilla Firefox' -HeadlessSelfTest -BundleFirefox
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF_NAME.Substring(1)
+          .\scripts\build_installer.ps1 -Version $version
+
+      - name: Publish GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = $env:GITHUB_REF_NAME.Substring(1)
+          $installer = "dist\installer\WebParserSetup-$version.exe"
+          $manifest = 'dist\installer\update.json'
+          gh release view $env:GITHUB_REF_NAME *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $env:GITHUB_REF_NAME $installer $manifest --clobber
+          } else {
+            gh release create $env:GITHUB_REF_NAME $installer $manifest --verify-tag --generate-notes --title "Web Parser $version"
+          }
+          if ($LASTEXITCODE -ne 0) { throw 'Could not publish release asset.' }
