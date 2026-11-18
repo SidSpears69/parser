@@ -10,10 +10,12 @@ import re
 import sys
 from tempfile import mkdtemp
 from typing import Callable
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 
 REPOSITORY = "SidSpears69/parser"
+RELEASE_FEED = f"https://raw.githubusercontent.com/{REPOSITORY}/release-feed/update.json"
 RELEASE_MANIFEST = f"https://github.com/{REPOSITORY}/releases/latest/download/update.json"
 MAX_INSTALLER_BYTES = 1_500_000_000
 _VERSION = re.compile(r"v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)\Z")
@@ -66,16 +68,33 @@ def _request(url: str, *, accept: str = "application/json") -> Request:
     })
 
 
-def latest_release() -> Release:
-    """Read the small manifest attached to GitHub's latest stable release."""
+def _read_release_manifest(url: str) -> object:
+    with urlopen(_request(url), timeout=15) as response:
+        payload = response.read(64_001)
+    if len(payload) > 64_000:
+        raise UpdateError("Ответ GitHub слишком большой.")
     try:
-        with urlopen(_request(RELEASE_MANIFEST), timeout=15) as response:
-            payload = response.read(64_001)
-        if len(payload) > 64_000:
-            raise UpdateError("Ответ GitHub слишком большой.")
-        release = json.loads(payload)
-    except (OSError, ValueError) as error:
-        raise UpdateError(f"Не удалось проверить релизы GitHub: {error}") from error
+        return json.loads(payload)
+    except (ValueError, UnicodeError) as error:
+        raise UpdateError("GitHub вернул некорректные данные релиза.") from error
+
+
+def latest_release() -> Release:
+    """Read the static release feed, falling back to the release asset if unavailable."""
+    try:
+        release = _read_release_manifest(RELEASE_FEED)
+    except OSError:
+        try:
+            release = _read_release_manifest(RELEASE_MANIFEST)
+        except HTTPError as error:
+            if error.code in (403, 429):
+                raise UpdateError(
+                    "GitHub временно ограничил проверку обновлений. "
+                    "Попробуйте позже или скачайте установщик со страницы релизов."
+                ) from error
+            raise UpdateError(f"Не удалось проверить релизы GitHub: HTTP {error.code}.") from error
+        except OSError as error:
+            raise UpdateError(f"Не удалось проверить релизы GitHub: {error}") from error
     if not isinstance(release, dict):
         raise UpdateError("GitHub вернул некорректные данные релиза.")
     version = release.get("version")
