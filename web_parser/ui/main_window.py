@@ -576,12 +576,19 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Обновления", f"Установлена последняя версия: {current}.")
             self.statusBar().showMessage("Обновлений нет")
             return
-        answer = QMessageBox.question(
-            self, "Доступно обновление",
+        dialog = QMessageBox(self)
+        dialog.setIcon(QMessageBox.Icon.Question)
+        dialog.setWindowTitle("Доступно обновление")
+        dialog.setText(
             f"Версия {release.version} доступна (установлена {current}). "
-            "Скачать и установить? Приложение закроется перед установкой.",
+            "Скачать и установить? Приложение закроется перед установкой."
         )
-        if answer == QMessageBox.StandardButton.Yes:
+        yes_button = dialog.addButton("Да", QMessageBox.ButtonRole.YesRole)
+        no_button = dialog.addButton("Нет", QMessageBox.ButtonRole.NoRole)
+        dialog.setDefaultButton(no_button)
+        dialog.setEscapeButton(no_button)
+        dialog.exec()
+        if dialog.clickedButton() is yes_button:
             self._start_update_thread(release)
 
     def _launch_installer(self, path: str) -> None:
