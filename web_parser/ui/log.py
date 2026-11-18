@@ -1,4 +1,4 @@
-"""Per-site error log widget."""
+"""Per-site event and error log widget."""
 
 from datetime import datetime
 from pathlib import Path
@@ -29,9 +29,10 @@ def _redact(text: str, secrets: Iterable[str]) -> str:
 
 
 class ErrorLog(QWidget):
-    """Bounded, per-site error log. Safe to append through a queued Qt signal."""
+    """Bounded, per-site event log. Safe to append through a queued Qt signal."""
 
     error_received = Signal(str, str, str)
+    event_recorded = Signal(str, str)
 
     def __init__(
         self, site: str, parent: QWidget | None = None, *,
@@ -46,7 +47,7 @@ class ErrorLog(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(9)
         toolbar = QHBoxLayout()
-        toolbar.addWidget(label("Журнал ошибок", "sectionTitle"))
+        toolbar.addWidget(label("Журнал событий", "sectionTitle"))
         self.count_label = label("0 записей", "hint")
         toolbar.addWidget(self.count_label)
         toolbar.addStretch()
@@ -66,7 +67,7 @@ class ErrorLog(QWidget):
         self.editor.setReadOnly(True)
         self.editor.setMaximumBlockCount(2000)
         self.editor.setPlaceholderText(
-            "Ошибок пока нет.\nЗдесь появятся время события, ID товара, URL и описание ошибки."
+            "Записей пока нет.\nЗдесь появятся время события, ID товара, URL и описание."
         )
         self.editor.setMinimumHeight(130)
         self.editor.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -103,13 +104,14 @@ class ErrorLog(QWidget):
             self.file.append(line)
         except OSError:
             self.file_label.setText("Не удалось записать файл журнала ошибок.")
+        self.event_recorded.emit(self.site, line)
 
     def export_to(self, path: str | Path) -> None:
         Path(path).write_text(self.editor.toPlainText() + "\n", encoding="utf-8")
 
     def _choose_export(self) -> None:
         path, _ = QFileDialog.getSaveFileName(
-            self, "Сохранить журнал ошибок", f"{self.site}-errors.txt", "Текстовые файлы (*.txt)"
+            self, "Сохранить журнал событий", f"{self.site}-events.txt", "Текстовые файлы (*.txt)"
         )
         if path:
             try:

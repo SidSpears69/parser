@@ -5,10 +5,12 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from ftplib import FTP, all_errors, error_perm
+from ftplib import FTP, all_errors, error_perm, error_proto, error_reply, error_temp
 from io import BytesIO
 import json
 from pathlib import Path
+import re
+from time import sleep
 from typing import Any
 from uuid import uuid4
 
@@ -34,6 +36,44 @@ class FTPExportError(RuntimeError):
 
 class FTPExportCancelled(FTPExportError):
     """The user stopped the upload before the JSON was published."""
+
+
+_FTP_REPLY_REASONS = {
+    "421": "сервер временно недоступен",
+    "425": "не удалось открыть соединение для передачи данных",
+    "426": "передача файла прервана",
+    "452": "на сервере недостаточно места",
+    "530": "не удалось войти на сервер",
+    "550": "сервер отказал в доступе к файлу или каталогу",
+    "552": "превышен лимит хранения на сервере",
+}
+
+
+def _transfer_error(stage: str, error: Exception, attempts: int) -> FTPExportError:
+    """Describe the failing stage without copying server text or credentials."""
+    if isinstance(error, (error_reply, error_temp, error_perm, error_proto)):
+        match = re.match(r"(\d{3})\b", str(error))
+        code = match.group(1) if match else None
+        reason = (
+            f"FTP {code}: {_FTP_REPLY_REASONS.get(code, 'сервер отклонил команду')}"
+            if code else "некорректный ответ FTP-сервера"
+        )
+    elif isinstance(error, TimeoutError):
+        reason = "превышено время ожидания"
+    elif isinstance(error, ConnectionRefusedError):
+        reason = "соединение отклонено"
+    elif isinstance(error, ConnectionResetError):
+        reason = "соединение сброшено"
+    elif isinstance(error, BrokenPipeError):
+        reason = "соединение разорвано"
+    elif isinstance(error, EOFError):
+        reason = "сервер закрыл соединение"
+    elif isinstance(error, OSError):
+        code = getattr(error, "winerror", None) or error.errno
+        reason = f"сетевая ошибка (код {code})" if code is not None else "ошибка соединения"
+    else:
+        reason = "ошибка передачи"
+    return FTPExportError(f"{stage}: {reason}. Попыток: {attempts}.")
 
 
 @dataclass(frozen=True, slots=True)
@@ -199,51 +239,74 @@ def export_run(
     absolute, base = _path_parts(remote_path)
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S") + "-" + uuid4().hex[:8]
     image_directory = f"images/{run_id}"
-    ftp = FTP(timeout=20)
-    uploaded = 0
 
     def check_cancelled(_block: bytes | None = None) -> None:
         if cancel_requested():
             raise FTPExportCancelled("Выгрузка на FTP остановлена пользователем.")
 
-    try:
-        ftp.connect(host.strip(), port, timeout=20)
-        ftp.login(username, password)
-        ftp.set_pasv(True)
-        home = ftp.pwd()
-        for batch in saved_images.values():
-            for image in batch:
-                check_cancelled()
-                relative = _image_relative_path(site, image, image_root)
-                parts = tuple(_remote_image_path(relative, image_directory).split("/"))
-                _enter_directory(ftp, home, absolute, (*base, *parts[:-1]))
-                with image.path.open("rb") as source:
-                    ftp.storbinary(f"STOR {parts[-1]}", source, callback=check_cancelled)
-                uploaded += 1
-        check_cancelled()
-        document = build_document(
-            site, links, results, saved_images,
-            image_root=image_root, image_directory=image_directory,
-        )
-        payload = (json.dumps(document, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
-        _enter_directory(ftp, home, absolute, base)
-        ftp.storbinary(
-            f"STOR .processed_products.json.uploading-{run_id}", BytesIO(payload),
-            callback=check_cancelled,
-        )
-        check_cancelled()
-        _publish_json(ftp, run_id)
-        prefix = f"{home.rstrip('/')}/" if not base else "/" if absolute else ""
-        remote_json = prefix + "/".join((*base, "processed_products.json"))
-        return FTPExportResult(remote_json, uploaded, len(document["products"]))
-    except FTPExportError:
-        raise
-    except error_perm as error:
-        raise FTPExportError("FTP отклонил вход, создание каталога или запись файла.") from error
-    except (OSError, *all_errors) as error:
-        raise FTPExportError("Не удалось передать данные на FTP-сервер.") from error
-    finally:
+    for attempt in (1, 2):
+        ftp = FTP(timeout=20)
+        uploaded = 0
+        stage = "подключение"
+        publishing = False
+        retry = False
         try:
-            ftp.close()
-        except OSError:
-            pass
+            check_cancelled()
+            ftp.connect(host.strip(), port, timeout=20)
+            stage = "вход на сервер"
+            ftp.login(username, password)
+            ftp.set_pasv(True)
+            home = ftp.pwd()
+            for batch in saved_images.values():
+                for image in batch:
+                    check_cancelled()
+                    relative = _image_relative_path(site, image, image_root)
+                    parts = tuple(_remote_image_path(relative, image_directory).split("/"))
+                    stage = f"подготовка каталога фото (ID {image.product_id})"
+                    _enter_directory(ftp, home, absolute, (*base, *parts[:-1]))
+                    stage = f"передача фото (ID {image.product_id}, №{image.position})"
+                    try:
+                        source = image.path.open("rb")
+                    except OSError as error:
+                        raise FTPExportError("Сохранённое фото недоступно для чтения.") from error
+                    with source:
+                        ftp.storbinary(f"STOR {parts[-1]}", source, callback=check_cancelled)
+                    uploaded += 1
+            check_cancelled()
+            document = build_document(
+                site, links, results, saved_images,
+                image_root=image_root, image_directory=image_directory,
+            )
+            payload = (json.dumps(document, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+            stage = "подготовка каталога JSON"
+            _enter_directory(ftp, home, absolute, base)
+            stage = "передача временного JSON"
+            ftp.storbinary(
+                f"STOR .processed_products.json.uploading-{run_id}", BytesIO(payload),
+                callback=check_cancelled,
+            )
+            check_cancelled()
+            stage = "публикация JSON"
+            publishing = True
+            _publish_json(ftp, run_id)
+            prefix = f"{home.rstrip('/')}/" if not base else "/" if absolute else ""
+            remote_json = prefix + "/".join((*base, "processed_products.json"))
+            return FTPExportResult(remote_json, uploaded, len(document["products"]))
+        except FTPExportError:
+            raise
+        except error_perm as error:
+            raise _transfer_error(stage, error, attempt) from error
+        except all_errors as error:
+            if attempt == 1 and not publishing:
+                retry = True
+            else:
+                raise _transfer_error(stage, error, attempt) from error
+        finally:
+            try:
+                ftp.close()
+            except OSError:
+                pass
+        if retry:
+            check_cancelled()
+            sleep(1)
+    raise AssertionError("Выгрузка FTP завершилась без результата или ошибки.")

@@ -117,7 +117,7 @@ class LinksTests(UiTestCase):
         self.assertFalse(link_item.font().underline())
         self.assertEqual(link_item.foreground().color().name(), "#245fd2")
         self.assertEqual(link_item.data(Qt.ItemDataRole.BackgroundRole), None)
-        with patch("web_parser.ui.site.QDesktopServices.openUrl", return_value=True) as open_url:
+        with patch("web_parser.ui.site_page.links.QDesktopServices.openUrl", return_value=True) as open_url:
             QTest.mouseClick(table.viewport(), Qt.MouseButton.LeftButton, pos=click_near_right_edge)
             QTest.mouseClick(
                 table.viewport(), Qt.MouseButton.LeftButton,

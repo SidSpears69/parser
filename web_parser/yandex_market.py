@@ -5,48 +5,118 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 import re
+from typing import Callable
 from urllib.parse import urljoin, urlsplit
 
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 from web_parser.browser_access import BrowserPageAccess
+from web_parser.layout_monitor import browser_fallback_fields, report_layout_fallback
 
 
 _RESULT_LIMIT = 6
 _CARD_SELECTOR = '[data-zone-name="productSnippet"]'
-_EXTRACT_CARDS = """(selector) => [...document.querySelectorAll(selector)].slice(0, 6)
-    .map(card => {
+_CARD_SELECTORS = (
+    _CARD_SELECTOR,
+    '[data-auto="snippet"]',
+    'article:has([data-auto="snippet-title"])',
+)
+_EXTRACT_CARDS = """(selectors) => {
+    const groups = selectors.map(selector => [...document.querySelectorAll(selector)].slice(0, 6));
+    const selected = groups.findIndex(cards => cards.length > 0);
+    const cards = selected < 0 ? [] : groups[selected];
+    return cards.map(card => {
+        const fallbacks = selected > 0 ? ['карточки'] : [];
+        const text = (field, candidates) => {
+            for (let index = 0; index < candidates.length; index++) {
+                const element = card.querySelector(candidates[index]);
+                const value = element?.textContent?.trim() || element?.getAttribute('title')?.trim();
+                if (value) {
+                    if (index) fallbacks.push(field);
+                    return value;
+                }
+            }
+            return null;
+        };
+        const money = value => {
+            const match = value?.match(/(\\d[\\d\\s\\u00a0\\u202f]*)(?:[,.](\\d{1,2}))?/);
+            return match ? match[1].replace(/\\s/g, '') + (match[2] ? '.' + match[2] : '') : null;
+        };
         let details = {};
-        try { details = JSON.parse(card.getAttribute('data-zone-data') || '{}'); }
+        try {
+            const parsed = JSON.parse(card.getAttribute('data-zone-data') || '{}');
+            if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) details = parsed;
+        }
         catch (_) { /* Validation below will report the incomplete card. */ }
         const discounts = Array.isArray(details.additionalPrices)
             ? details.additionalPrices : [];
-        const discount = discounts.find(item => item.priceType === 'withDiscount');
+        const discount = discounts.find(item => item && item.priceType === 'withDiscount');
         const rating = card.querySelector('[data-zone-name="rating"] .ds-rating__value');
         const ratingText = card.querySelector('[data-zone-name="rating"]')?.innerText || '';
-        const title = card.querySelector('[data-auto="snippet-title"]');
+        const title = card.querySelector('[data-auto="snippet-title"]')
+            || card.querySelector('h3, h2');
         const gallery = card.querySelector('[data-auto="galleryLink"]');
         const link = title?.closest('a[href]') || title?.querySelector('a[href]')
             || gallery?.closest('a[href]') || gallery?.querySelector('a[href]')
             || card.querySelector('a[href*="/product"], a[href*="/card/"], a[href*="/offer/"]');
+        const image = card.querySelector('[data-auto="galleryLink"] img[src^="https://avatars.mds.yandex.net/"]');
+        const alternateImage = [...card.querySelectorAll('img[src], img[data-src]')]
+            .flatMap(element => [element.getAttribute('src'), element.getAttribute('data-src')])
+            .find(value => value?.startsWith('https://avatars.mds.yandex.net/'));
+        if (!image && alternateImage) fallbacks.push('фото');
+        const declaredPrice = ['number', 'string'].includes(typeof details.price) ? details.price : null;
+        const declaredDiscount = ['number', 'string'].includes(typeof discount?.priceValue)
+            ? discount.priceValue : null;
+        const currentPrice = declaredPrice == null || declaredDiscount == null
+            ? money(text('цена', [
+                '[data-auto="snippet-price-current"]', '[data-auto="price-value"]',
+                '[data-auto="price"]',
+            ])) : null;
+        const oldPrice = declaredPrice == null
+            ? money(text('старая цена', [
+                '[data-auto="snippet-price-old"]', '[data-auto="old-price"]',
+            ])) : null;
+        const price = declaredPrice ?? oldPrice ?? currentPrice;
+        const discounted = declaredDiscount ?? currentPrice ?? price;
+        if (declaredPrice == null && price != null) fallbacks.push('цена из DOM');
+        if (declaredDiscount == null && currentPrice != null && declaredPrice != null)
+            fallbacks.push('цена со скидкой из DOM');
+        const primaryName = card.querySelector('[data-auto="snippet-title"]')?.textContent?.trim();
+        const name = text('название', ['[data-auto="snippet-title"]', 'h3', 'h2'])
+            || card.querySelector('img[alt]')?.getAttribute('alt') || null;
+        if (!primaryName && name && !fallbacks.includes('название')) fallbacks.push('название');
+        const alternateRating = rating ? null : text('рейтинг', [
+            '[data-auto="rating-value"]', '[data-auto="rating"]',
+        ])?.match(/\\d(?:[.,]\\d)?/)?.[0] ?? null;
+        if (alternateRating) fallbacks.push('рейтинг');
+        const primaryReviews = ratingText.match(/\\((\\d[\\d\\s\\u00a0\\u2009\\u202f]*)\\)/)?.[1];
+        const alternateReviews = primaryReviews ? null : text('отзывы', [
+            '[data-auto="rating-count"]', '[data-auto="reviews-count"]',
+        ])?.match(/[\\d\\s\\u00a0\\u2009\\u202f]+/)?.[0] ?? null;
+        if (alternateReviews) fallbacks.push('отзывы');
         return {
             product_url: link?.getAttribute('href') ?? null,
-            image_url: card.querySelector('[data-auto="galleryLink"] img')
-                ?.getAttribute('src') ?? null,
-            price: details.price ?? null,
-            discounted_price: discount?.priceValue ?? details.price ?? null,
-            name: card.querySelector('[data-auto="snippet-title"]')?.textContent ?? null,
-            rating: rating?.textContent ?? null,
-            reviews: ratingText.match(/\\((\\d[\\d\\s\\u00a0\\u2009\\u202f]*)\\)/)?.[1] ?? null,
+            image_url: image?.getAttribute('src') ?? alternateImage ?? null,
+            price: price ?? null,
+            discounted_price: discounted ?? null,
+            name: name,
+            rating: rating?.textContent ?? alternateRating ?? null,
+            reviews: primaryReviews ?? alternateReviews ?? null,
+            _layout_fallbacks: fallbacks,
         };
-    })"""
+    });
+}"""
 _EMPTY_CHECK = """() => /ничего не найдено|товары не найдены|ничего не нашлось/i
     .test(document.body?.innerText || '')"""
 
 
 class YandexMarketError(RuntimeError):
     """The search page does not contain usable product cards."""
+
+
+class YandexMarketLayoutError(YandexMarketError):
+    """An accessible search page does not match any known card layout."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,7 +155,7 @@ def _reviews(value: object, position: int) -> int:
 def parse_yandex_cards(raw_cards: object) -> tuple[YandexMarketProduct, ...]:
     """Validate browser extracted cards while retaining the order on the page."""
     if not isinstance(raw_cards, list):
-        raise YandexMarketError("Яндекс Маркет изменил формат поисковой выдачи.")
+        raise YandexMarketLayoutError("Яндекс Маркет изменил формат поисковой выдачи.")
     products: list[YandexMarketProduct] = []
     for position, card in enumerate(raw_cards[:_RESULT_LIMIT], 1):
         if not isinstance(card, dict):
@@ -129,19 +199,32 @@ def parse_yandex_cards(raw_cards: object) -> tuple[YandexMarketProduct, ...]:
     return tuple(products)
 
 
-def parse_yandex_search(access: BrowserPageAccess) -> tuple[YandexMarketProduct, ...]:
-    """Extract visible product cards from the page opened by BrowserPageAccess."""
+def parse_yandex_search(
+    access: BrowserPageAccess, *, on_layout_change: Callable[[str], None] | None = None,
+) -> tuple[YandexMarketProduct, ...]:
+    """Extract visible cards and report when fallback selectors were needed."""
     page = access.page
     try:
         try:
-            page.wait_for_selector(_CARD_SELECTOR, timeout=8_000)
+            page.wait_for_selector(", ".join(_CARD_SELECTORS), timeout=8_000)
         except PlaywrightTimeoutError:
             pass
-        raw_cards = page.evaluate(_EXTRACT_CARDS, _CARD_SELECTOR)
+        raw_cards = page.evaluate(_EXTRACT_CARDS, _CARD_SELECTORS)
         if not raw_cards:
             if page.evaluate(_EMPTY_CHECK):
                 return ()
-            raise YandexMarketError("В выдаче Яндекс Маркета не найдены карточки товаров.")
-        return parse_yandex_cards(raw_cards)
+            raise YandexMarketLayoutError(
+                "В выдаче Яндекс Маркета не найдены карточки товаров; проверьте селекторы выдачи."
+            )
+        try:
+            products = parse_yandex_cards(raw_cards)
+        except YandexMarketError as error:
+            if browser_fallback_fields(raw_cards):
+                raise YandexMarketLayoutError(
+                    f"Запасные селекторы Яндекс Маркета не прочитали выдачу: {error}"
+                ) from error
+            raise
+        report_layout_fallback(on_layout_change, browser_fallback_fields(raw_cards))
+        return products
     except PlaywrightError as error:
         raise YandexMarketError(f"Не удалось прочитать выдачу Яндекс Маркета: {error}") from error

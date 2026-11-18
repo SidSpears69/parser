@@ -89,7 +89,7 @@ class WorkerProxyTests(unittest.TestCase):
             patch("web_parser.ui.workers.WildberriesClient", FakeWildberriesClient),
             patch("web_parser.ui.workers.ImageStore", FakeImageStore),
             patch("web_parser.ui.workers.parse_ozon_search", return_value=()),
-            patch("web_parser.ui.workers.parse_yandex_search", side_effect=lambda current: (
+            patch("web_parser.ui.workers.parse_yandex_search", side_effect=lambda current, **_options: (
                 parsed_routes.append(current.direct) or ()
             )),
         ):
@@ -365,7 +365,7 @@ class WorkerProxyTests(unittest.TestCase):
                 return {"products": []}
 
         class FakeWildberriesClient:
-            def __init__(self, *, proxy, playwright):
+            def __init__(self, *, proxy, playwright, **_options):
                 client_options.append((proxy, playwright))
 
             def __enter__(self):

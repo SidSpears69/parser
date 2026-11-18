@@ -6,11 +6,13 @@ from dataclasses import dataclass
 from decimal import Decimal
 import json
 import time
+from typing import Callable
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 from playwright.sync_api import APIRequestContext, Error as PlaywrightError
 from playwright.sync_api import Playwright, sync_playwright
 
+from web_parser.layout_monitor import report_layout_fallback
 from web_parser.network_errors import request_failure_reason
 
 
@@ -25,6 +27,10 @@ _REQUEST_ATTEMPTS = 3
 
 class WildberriesError(RuntimeError):
     """The storefront JSON is unavailable or does not contain usable products."""
+
+
+class WildberriesLayoutError(WildberriesError):
+    """A valid storefront response no longer matches known product layouts."""
 
 
 class WildberriesHTTPError(WildberriesError):
@@ -128,26 +134,40 @@ def _money(kopecks: object, field: str) -> Decimal:
     return Decimal(kopecks) / 100
 
 
-def _price_fields(product: dict) -> tuple[Decimal, Decimal]:
+def _price_fields(product: dict) -> tuple[Decimal, Decimal, bool]:
     sizes = product.get("sizes")
+    invalid_size_price: WildberriesError | None = None
     if isinstance(sizes, list):
         for size in sizes:
             if isinstance(size, dict) and isinstance(size.get("price"), dict):
                 price = size["price"]
-                return _money(price.get("basic"), "basic"), _money(price.get("product"), "product")
-    return _money(product.get("priceU"), "priceU"), _money(product.get("salePriceU"), "salePriceU")
+                try:
+                    return _money(price.get("basic"), "basic"), _money(price.get("product"), "product"), False
+                except WildberriesError as error:
+                    invalid_size_price = error
+    if product.get("priceU") is not None and product.get("salePriceU") is not None:
+        return _money(product["priceU"], "priceU"), _money(product["salePriceU"], "salePriceU"), True
+    if invalid_size_price is not None:
+        raise invalid_size_price
+    return _money(product.get("priceU"), "priceU"), _money(product.get("salePriceU"), "salePriceU"), True
 
 
-def parse_search_json(document: object, routes_document: object) -> tuple[WildberriesProduct, ...]:
+def parse_search_json(
+    document: object, routes_document: object, *,
+    on_layout_change: Callable[[str], None] | None = None,
+) -> tuple[WildberriesProduct, ...]:
     """Extract the first six results and their primary photo URLs."""
     if not isinstance(document, dict):
         raise WildberriesError("Wildberries вернул неверный JSON выдачи.")
+    fallbacks: set[str] = set()
     products = document.get("products")
     data = document.get("data")
-    if products is None and isinstance(data, dict):
+    if not isinstance(products, list) and isinstance(data, dict):
         products = data.get("products")
+        if isinstance(products, list):
+            fallbacks.add("список товаров")
     if not isinstance(products, list):
-        raise WildberriesError("В JSON Wildberries отсутствует список товаров.")
+        raise WildberriesLayoutError("В JSON Wildberries отсутствует список товаров.")
     if not products:
         return ()
     routes = _basket_routes(routes_document)
@@ -159,7 +179,13 @@ def parse_search_json(document: object, routes_document: object) -> tuple[Wildbe
         pics = raw.get("pics")
         name = raw.get("name")
         reviews = raw.get("feedbacks")
-        rating = raw.get("reviewRating", raw.get("rating"))
+        if reviews is None and "feedbacksCount" in raw:
+            reviews = raw["feedbacksCount"]
+            fallbacks.add("число отзывов")
+        rating = raw.get("reviewRating")
+        if rating is None and "rating" in raw:
+            rating = raw["rating"]
+            fallbacks.add("рейтинг")
         if (
             not isinstance(wb_id, int) or isinstance(wb_id, bool) or wb_id <= 0
             or not isinstance(pics, int) or isinstance(pics, bool) or pics < 1
@@ -181,12 +207,15 @@ def parse_search_json(document: object, routes_document: object) -> tuple[Wildbe
         pics_update = raw.get("picsUpdate")
         if type(pics_update) is int and pics_update >= 0:
             image_url += f"?picsUpdate={pics_update}"
-        price, discounted_price = _price_fields(raw)
+        price, discounted_price, alternate_price = _price_fields(raw)
+        if alternate_price:
+            fallbacks.add("цены")
         result.append(WildberriesProduct(
             wb_id, image_url, price, discounted_price, name.strip(),
             Decimal(str(rating)) if rating is not None else None, reviews,
             f"https://www.wildberries.ru/catalog/{wb_id}/detail.aspx",
         ))
+    report_layout_fallback(on_layout_change, fallbacks)
     return tuple(result)
 
 
@@ -195,12 +224,14 @@ class WildberriesClient:
 
     def __init__(
         self, proxy: dict[str, str] | None = None, *, playwright: Playwright | None = None,
+        on_layout_change: Callable[[str], None] | None = None,
     ) -> None:
         self.proxy = proxy.copy() if proxy is not None else None
         self._playwright = playwright
         self._owns_playwright = playwright is None
         self._request: APIRequestContext | None = None
         self._routes: object | None = None
+        self.on_layout_change = on_layout_change
 
     def __enter__(self) -> WildberriesClient:
         try:
@@ -280,10 +311,14 @@ class WildberriesClient:
         """Parse JSON obtained by the existing browser when direct HTTP is denied."""
         if isinstance(document, dict):
             data = document.get("data")
-            if document.get("products") == [] or (
-                isinstance(data, dict) and data.get("products") == []
+            products = document.get("products")
+            if products == [] or (
+                not isinstance(products, list) and isinstance(data, dict)
+                and data.get("products") == []
             ):
                 return ()
         if self._routes is None:
             self._routes = self._json(_CDN_ROUTES_URL, "Маршруты фото Wildberries")
-        return parse_search_json(document, self._routes)
+        return parse_search_json(
+            document, self._routes, on_layout_change=self.on_layout_change,
+        )

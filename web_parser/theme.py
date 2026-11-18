@@ -25,6 +25,8 @@ QTabBar::tab:selected { color: #245fd2; border-bottom: 3px solid #245fd2; }
 QTabBar::tab:hover:!selected { background: #eaf0f8; }
 QWidget#sitePage, QScrollArea, QScrollArea > QWidget > QWidget { background: white; }
 QScrollArea { border: none; }
+QScrollArea#settingsScroll, QScrollArea#settingsScroll > QWidget,
+QScrollArea#settingsScroll > QWidget > QWidget { background: #f3f5f9; }
 QFrame#section { background: white; border: 1px solid #e0e6ef; border-radius: 8px; }
 QLineEdit, QSpinBox, QTimeEdit, QComboBox {
     background: #fbfcfe; border: 1px solid #cdd7e4; border-radius: 5px;

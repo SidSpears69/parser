@@ -32,6 +32,49 @@ class ConfigError(ValueError):
 class LoadedConfig:
     sites: dict[str, dict]
     proxy: dict[str, str | bool]
+    email: dict[str, str | int | bool]
+
+
+def default_email() -> dict[str, str | int | bool]:
+    return {
+        "enabled": False, "host": "", "port": 465, "security": "ssl",
+        "username": "", "password": "", "sender": "", "recipient": "", "recipient2": "",
+    }
+
+
+def validate_email(value: object) -> dict[str, str | int | bool]:
+    fields = _require_fields(
+        value, {"enabled", "host", "port", "security", "username", "password", "sender", "recipient"},
+        "Почта", optional=("recipient2",),
+    )
+    if type(fields["enabled"]) is not bool:
+        raise ConfigError("Почта: признак включения должен быть логическим.")
+    host = _string(fields["host"], "Почта, SMTP-сервер").strip()
+    port = _integer(fields["port"], 1, 65535, "Почта, порт SMTP")
+    security = _string(fields["security"], "Почта, защита соединения")
+    username = _string(fields["username"], "Почта, логин")
+    password = _string(fields["password"], "Почта, пароль")
+    sender = _string(fields["sender"], "Почта, адрес отправителя").strip()
+    recipient = _string(fields["recipient"], "Почта, адрес администратора").strip()
+    recipient2 = _string(fields.get("recipient2", ""), "Почта, второй адрес").strip()
+    if security not in {"ssl", "starttls"}:
+        raise ConfigError("Почта: выберите SSL/TLS или STARTTLS.")
+    if fields["enabled"]:
+        if not host or any(char.isspace() or char in "/\\:@" for char in host):
+            raise ConfigError("Почта: укажите адрес SMTP-сервера без протокола и порта.")
+        if bool(username) != bool(password):
+            raise ConfigError("Почта: укажите логин и пароль вместе либо оставьте оба поля пустыми.")
+        if not all(re.fullmatch(r"[^@\s<>]+@[^@\s<>]+\.[^@\s<>]+", address) for address in (sender, recipient)):
+            raise ConfigError("Почта: укажите корректные адреса отправителя и администратора.")
+        if recipient2 and not re.fullmatch(r"[^@\s<>]+@[^@\s<>]+\.[^@\s<>]+", recipient2):
+            raise ConfigError("Почта: укажите корректный второй адрес получателя.")
+        if recipient2 and recipient2.casefold() == recipient.casefold():
+            raise ConfigError("Почта: адреса получателей должны различаться.")
+    return {
+        "enabled": fields["enabled"], "host": host, "port": port, "security": security,
+        "username": username, "password": password, "sender": sender,
+        "recipient": recipient, "recipient2": recipient2,
+    }
 
 
 def default_proxy() -> dict[str, str | bool]:
@@ -261,10 +304,12 @@ def _decrypt(value: object, location: str) -> str:
 
 def save(
     path: str | Path, sites: dict[str, dict], proxy: dict[str, str | bool] | None = None,
+    email: dict[str, str | int | bool] | None = None,
 ) -> None:
     """Atomically export all tabs and the optional shared proxy."""
     checked = _validate_sites(sites)
     checked_proxy = validate_proxy(proxy) if proxy is not None else None
+    checked_email = validate_email(email) if email is not None else None
     for settings in checked.values():
         settings["token"] = _encrypt(settings["token"])
         settings["ftp"]["password"] = _encrypt(settings["ftp"]["password"])
@@ -273,6 +318,10 @@ def save(
         if checked_proxy is not None:
             document["proxy"] = {
                 **checked_proxy, "password": _encrypt(str(checked_proxy["password"])),
+            }
+        if checked_email is not None:
+            document["email"] = {
+                **checked_email, "password": _encrypt(str(checked_email["password"])),
             }
         serialized = json.dumps(document, ensure_ascii=False, indent=2) + "\n"
         destination = Path(path)
@@ -300,7 +349,7 @@ def load_document(path: str | Path) -> LoadedConfig:
         document = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
         raise ConfigError(f"Не удалось прочитать файл конфигурации: {error}") from error
-    document = _require_fields(document, {"version", "sites"}, "Конфигурация", optional=("proxy",))
+    document = _require_fields(document, {"version", "sites"}, "Конфигурация", optional=("proxy", "email"))
     if type(document["version"]) is not int or document["version"] != VERSION:
         raise ConfigError("Неподдерживаемая версия файла конфигурации.")
     encrypted_sites = _require_fields(document["sites"], set(SITES), "Сайты")
@@ -336,7 +385,18 @@ def load_document(path: str | Path) -> LoadedConfig:
             **encrypted_proxy,
             "password": _decrypt(encrypted_proxy["password"], "Прокси, пароль"),
         })
-    return LoadedConfig(_validate_sites(plain_sites), proxy)
+    email = default_email()
+    if "email" in document:
+        encrypted_email = _require_fields(
+            document["email"],
+            {"enabled", "host", "port", "security", "username", "password", "sender", "recipient"},
+            "Почта", optional=("recipient2",),
+        )
+        email = validate_email({
+            **encrypted_email,
+            "password": _decrypt(encrypted_email["password"], "Почта, пароль"),
+        })
+    return LoadedConfig(_validate_sites(plain_sites), proxy, email)
 
 
 def load(path: str | Path) -> dict[str, dict]:

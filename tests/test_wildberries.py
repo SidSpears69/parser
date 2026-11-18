@@ -74,6 +74,28 @@ class WildberriesParserTests(unittest.TestCase):
         self.assertEqual(result.rating, Decimal("4.5"))
         self.assertEqual(parse_search_json({"products": []}, ROUTES), ())
 
+    def test_valid_fallback_json_reports_layout_change_once(self):
+        item = product(0)
+        item["sizes"][0]["price"]["basic"] = None
+        item.update(priceU=12500, salePriceU=9900, feedbacksCount=27, rating=4.5)
+        del item["feedbacks"]
+        del item["reviewRating"]
+        notices: list[str] = []
+        result = parse_search_json(
+            {"data": {"products": [item]}}, ROUTES,
+            on_layout_change=notices.append,
+        )
+        self.assertEqual(result[0].price, Decimal("125"))
+        self.assertEqual(result[0].reviews, 27)
+        self.assertEqual(result[0].rating, Decimal("4.5"))
+        self.assertEqual(len(notices), 1)
+        self.assertIn("список товаров", notices[0])
+        self.assertIn("цены", notices[0])
+
+        notices.clear()
+        parse_search_json({"products": [product(0)]}, ROUTES, on_layout_change=notices.append)
+        self.assertEqual(notices, [])
+
     def test_malformed_json_is_not_mistaken_for_empty_search(self):
         with self.assertRaisesRegex(WildberriesError, "отсутствует список"):
             parse_search_json({"metadata": {}}, ROUTES)

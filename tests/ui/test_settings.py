@@ -16,6 +16,10 @@ from .base import UiTestCase
 
 class SettingsTests(UiTestCase):
     def test_tabs_keep_independent_values(self):
+        self.assertEqual(self.window.main_tabs.count(), 2)
+        self.assertEqual(self.window.main_tabs.tabText(1), "Общие настройки")
+        self.assertIs(self.window.main_tabs.widget(0), self.window.tabs)
+        self.assertIs(self.window.main_tabs.widget(1), self.window.settings_scroll)
         self.assertEqual(self.window.tabs.count(), 4)
         self.assertEqual(self.window.tabs.tabText(3), "setepolotna.ru")
         self.assertIn("setepolotna.ru", self.window.pages)

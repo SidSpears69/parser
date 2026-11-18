@@ -16,12 +16,14 @@ from web_parser.browser_access import (
 from web_parser.browser_discovery import BrowserInstallation
 from web_parser.ftp_export import FTPExportCancelled, FTPExportError, FTPExportResult, export_run
 from web_parser.images import ImageDownloadCancelled, ImageStore, SavedImage
-from web_parser.ozon import OzonError, OzonProduct, parse_ozon_search
+from web_parser.ozon import OzonError, OzonLayoutError, OzonProduct, parse_ozon_search
 from web_parser.product_links import ProductLinks, ProductLinksError, fetch_product_links
 from web_parser.wildberries import (
-    WildberriesClient, WildberriesError, WildberriesProduct,
+    WildberriesClient, WildberriesError, WildberriesLayoutError, WildberriesProduct,
 )
-from web_parser.yandex_market import YandexMarketError, YandexMarketProduct, parse_yandex_search
+from web_parser.yandex_market import (
+    YandexMarketError, YandexMarketLayoutError, YandexMarketProduct, parse_yandex_search,
+)
 
 
 class BrowserWalkThread(QThread):
@@ -30,6 +32,8 @@ class BrowserWalkThread(QThread):
     page_started = Signal(str, str, str, int, int)
     page_loaded = Signal(str, str, int, int, int, bool)
     page_failed = Signal(str, str, str, int, int, str)
+    layout_notice = Signal(str, str, str, str)
+    layout_failure = Signal(str, str, str, str)
     ozon_parsed = Signal(str, object)
     wildberries_parsed = Signal(str, object)
     yandex_parsed = Signal(str, object)
@@ -58,6 +62,7 @@ class BrowserWalkThread(QThread):
         self.failed = 0
         self.cancelled = False
         self.error: str | None = None
+        self.fatal_layout: str | None = None
         self.ozon_results: dict[str, tuple[OzonProduct, ...]] = {}
         self.wildberries_results: dict[str, tuple[WildberriesProduct, ...]] = {}
         self.yandex_results: dict[str, tuple[YandexMarketProduct, ...]] = {}
@@ -99,6 +104,17 @@ class BrowserWalkThread(QThread):
     def run(self) -> None:
         total = len(self.links) * 3
         index = 0
+        layout_context: tuple[str, str, str] | None = None
+        reported_layouts: set[tuple[str, str]] = set()
+
+        def report_layout_change(message: str) -> None:
+            if layout_context is not None:
+                layout_marketplace = layout_context[1]
+                signature = (layout_marketplace, message)
+                if signature not in reported_layouts:
+                    reported_layouts.add(signature)
+                    self.layout_notice.emit(*layout_context, message)
+
         try:
             with BrowserPageAccess(
                 self.installation, self.pause_seconds, headless=self.headless,
@@ -108,6 +124,7 @@ class BrowserWalkThread(QThread):
             ) as access, WildberriesClient(
                 proxy=getattr(access, "effective_proxy", self.proxy),
                 playwright=getattr(access, "playwright", None),
+                on_layout_change=report_layout_change,
             ) as wildberries, ExitStack() as recovery:
                 notice = getattr(access, "launch_notice", None)
                 if notice:
@@ -155,6 +172,7 @@ class BrowserWalkThread(QThread):
                             self.cancelled = True
                             return
                         index += 1
+                        layout_context = (product.product_id, marketplace, url)
                         self.page_started.emit(product.product_id, marketplace, url, index, total)
                         try:
                             if marketplace == "Wildberries":
@@ -279,12 +297,16 @@ class BrowserWalkThread(QThread):
                                         ozon_direct_active = True
                                 status = snapshot.status
                                 if marketplace == "Ozon":
-                                    parsed_ozon = parse_ozon_search(marketplace_access)
+                                    parsed_ozon = parse_ozon_search(
+                                        marketplace_access, on_layout_change=report_layout_change,
+                                    )
                                     self.ozon_results[product.product_id] = parsed_ozon
                                     self.ozon_parsed.emit(product.product_id, parsed_ozon)
                                     parsed_products = parsed_ozon
                                 else:
-                                    parsed_yandex = parse_yandex_search(marketplace_access)
+                                    parsed_yandex = parse_yandex_search(
+                                        marketplace_access, on_layout_change=report_layout_change,
+                                    )
                                     self.yandex_results[product.product_id] = parsed_yandex
                                     self.yandex_parsed.emit(product.product_id, parsed_yandex)
                                     parsed_products = parsed_yandex
@@ -306,6 +328,11 @@ class BrowserWalkThread(QThread):
                                 )
                         except (BrowserAccessCancelled, ImageDownloadCancelled):
                             self.cancelled = True
+                            return
+                        except (OzonLayoutError, WildberriesLayoutError, YandexMarketLayoutError) as error:
+                            self.failed += 1
+                            self.fatal_layout = str(error)
+                            self.layout_failure.emit(product.product_id, marketplace, url, str(error))
                             return
                         except (
                             BrowserAccessError, OzonError, WildberriesError, YandexMarketError,

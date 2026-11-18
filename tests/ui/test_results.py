@@ -71,7 +71,7 @@ class ResultsTests(UiTestCase):
         self.assertEqual(page.ozon_table.item(0, 4).text(), "4.8")
         self.assertEqual(page.ozon_table.item(0, 5).text(), "12")
         self.assertEqual(page.ozon_results["42"], (sample_ozon_product(),))
-        with patch("web_parser.ui.site.QDesktopServices.openUrl", return_value=True) as open_url:
+        with patch("web_parser.ui.site_page.links.QDesktopServices.openUrl", return_value=True) as open_url:
             page.ozon_table.cellClicked.emit(0, 6)
         open_url.assert_called_once()
         self.assertEqual(open_url.call_args.args[0].toString(), sample_ozon_product().image_url)
@@ -83,7 +83,7 @@ class ResultsTests(UiTestCase):
         self.assertEqual(page.wildberries_table.item(0, 4).text(), "4.9")
         self.assertEqual(page.wildberries_table.item(0, 5).text(), "26")
         self.assertEqual(page.wildberries_results["42"][0].wb_id, 519585970)
-        with patch("web_parser.ui.site.QDesktopServices.openUrl", return_value=True) as open_url:
+        with patch("web_parser.ui.site_page.links.QDesktopServices.openUrl", return_value=True) as open_url:
             page.wildberries_table.cellClicked.emit(0, 6)
         open_url.assert_called_once()
         self.assertEqual(open_url.call_args.args[0].toString(), sample_wildberries_product().image_url)
@@ -95,7 +95,7 @@ class ResultsTests(UiTestCase):
         self.assertEqual(page.yandex_table.item(0, 5).text(), "18")
         self.assertEqual(page.yandex_table.horizontalHeaderItem(5).text(), "Оценки")
         self.assertEqual(page.yandex_results["42"], (sample_yandex_product(),))
-        with patch("web_parser.ui.site.QDesktopServices.openUrl", return_value=True) as open_url:
+        with patch("web_parser.ui.site_page.links.QDesktopServices.openUrl", return_value=True) as open_url:
             page.yandex_table.cellClicked.emit(0, 6)
         open_url.assert_called_once()
         self.assertEqual(open_url.call_args.args[0].toString(), sample_yandex_product().image_url)

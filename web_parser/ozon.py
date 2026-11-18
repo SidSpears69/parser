@@ -5,41 +5,96 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import Decimal
 import re
+from typing import Callable
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 from web_parser.browser_access import BrowserPageAccess
+from web_parser.layout_monitor import browser_fallback_fields, report_layout_fallback
 
 
 _RESULT_LIMIT = 6
 _CARD_SELECTOR = '[data-widget="tileGridDesktop"] .tile-root[data-index]'
-_READY_CHECK = """(selector) => {
-    const cards = [...document.querySelectorAll(selector)].slice(0, 6);
-    return cards.length === 6 && cards.every(card =>
-        !!card.querySelector('a[href*="/product/"] span.tsBody500Medium')
-        && !!card.querySelector('span.tsHeadline500Medium')
-        && !!card.querySelector('a[href*="/product/"] img[src^="https://ir.ozone.ru/"]')
-    );
+_CARD_SELECTORS = (
+    _CARD_SELECTOR,
+    '.tile-root:has(a[href*="/product/"])',
+    '[data-index]:has(a[href*="/product/"])',
+)
+_READY_CHECK = """(selectors) => {
+    const groups = selectors.map(selector => [...document.querySelectorAll(selector)].slice(0, 6));
+    const cards = groups.reduce((best, found) => found.length > best.length ? found : best, []);
+    return cards.length === 6 && cards.every(card => {
+        const name = card.querySelector('a[href*="/product/"] span.tsBody500Medium, '
+            + '[data-auto="product-title"], a[href*="/product/"] [title], '
+            + 'a[href*="/product/"] img[alt]');
+        const price = card.querySelector('span.tsHeadline500Medium, '
+            + '[data-auto="price-value"], [data-widget="webPrice"]');
+        return !!card.querySelector('a[href*="/product/"]')
+            && !!card.querySelector('img[src*="ir.ozone.ru/"], img[data-src*="ir.ozone.ru/"]')
+            && !!name && !!price && price.textContent.includes('₽');
+    });
 }"""
-_EXTRACT_CARDS = """(selector) => {
-    const cards = [...document.querySelectorAll(selector)].slice(0, 6);
+_EXTRACT_CARDS = """(selectors) => {
+    const groups = selectors.map(selector => [...document.querySelectorAll(selector)].slice(0, 6));
+    const selected = groups.reduce((best, cards, index) =>
+        cards.length > groups[best].length ? index : best, 0);
+    const cards = groups[selected];
     return cards.map(card => {
+        const fallbacks = selected > 0 ? ['карточки'] : [];
+        const text = (field, candidates, required = false) => {
+            for (let index = 0; index < candidates.length; index++) {
+                const element = card.querySelector(candidates[index]);
+                const value = element?.textContent?.trim() || element?.getAttribute('title')?.trim();
+                if (value && (!required || value.includes('₽'))) {
+                    if (index) fallbacks.push(field);
+                    return value;
+                }
+            }
+            return null;
+        };
+        const image = card.querySelector('a[href*="/product/"] img[src^="https://ir.ozone.ru/"]');
+        const alternateImage = [...card.querySelectorAll('img[src], img[data-src]')]
+            .flatMap(element => [element.getAttribute('src'), element.getAttribute('data-src')])
+            .find(value => value?.startsWith('https://ir.ozone.ru/'));
+        if (!image && alternateImage) fallbacks.push('фото');
         const small = [...card.querySelectorAll('span.tsBodyControl300XSmall')]
             .map(element => element.textContent.trim());
         const original = [...card.querySelectorAll('span.tsBodyControl400Small')]
             .find(element => element.textContent.includes('₽'));
+        const alternateOriginal = original ? null : text('старая цена',
+            ['[data-auto="old-price"]', '[aria-label*="Старая цена"]'], true);
+        if (alternateOriginal) fallbacks.push('старая цена');
+        const name = text('название', [
+            'a[href*="/product/"] span.tsBody500Medium',
+            '[data-auto="product-title"]',
+            'a[href*="/product/"] [title]',
+        ]) || card.querySelector('a[href*="/product/"] img[alt]')?.getAttribute('alt');
+        if (!card.querySelector('a[href*="/product/"] span.tsBody500Medium') && name
+            && !fallbacks.includes('название')) fallbacks.push('название');
+        const primaryRating = small.find(value => /^\\d(?:[.,]\\d)?$/.test(value));
+        const alternateRating = primaryRating ? null : text('рейтинг', [
+            '[data-auto="rating"]', '[data-auto="rating-value"]',
+        ])?.match(/\\d(?:[.,]\\d)?/)?.[0] ?? null;
+        if (alternateRating) fallbacks.push('рейтинг');
+        const primaryReviews = small.find(value => /отзыв|оценк/i.test(value));
+        const alternateReviews = primaryReviews ? null : text('отзывы', [
+            '[data-auto="rating-count"]', '[data-auto="reviews-count"]',
+        ]);
+        if (alternateReviews) fallbacks.push('отзывы');
         return {
             product_url: card.querySelector('a[href*="/product/"]')?.getAttribute('href') ?? null,
-            image_url: card.querySelector('a[href*="/product/"] img[src^="https://ir.ozone.ru/"]')
-                ?.getAttribute('src') ?? null,
-            current_price: card.querySelector('span.tsHeadline500Medium')?.textContent ?? null,
-            original_price: original?.textContent ?? null,
-            name: card.querySelector('a[href*="/product/"] span.tsBody500Medium')
-                ?.textContent ?? null,
-            rating: small.find(value => /^\\d(?:[.,]\\d)?$/.test(value)) ?? null,
-            reviews: small.find(value => /отзыв|оценк/i.test(value)) ?? null,
+            image_url: image?.getAttribute('src') ?? alternateImage ?? null,
+            current_price: text('цена', [
+                'span.tsHeadline500Medium', '[data-auto="price-value"]',
+                '[data-widget="webPrice"] span',
+            ], true),
+            original_price: original?.textContent ?? alternateOriginal ?? null,
+            name: name ?? null,
+            rating: primaryRating ?? alternateRating ?? null,
+            reviews: primaryReviews ?? alternateReviews ?? null,
+            _layout_fallbacks: fallbacks,
         };
     });
 }"""
@@ -51,6 +106,10 @@ _REVIEWS = re.compile(r"(\d[\d\s\u00a0\u2009\u202f]*(?:[,.]\d+)?)\s*(тыс\.)?"
 
 class OzonError(RuntimeError):
     """The search page does not contain usable product cards."""
+
+
+class OzonLayoutError(OzonError):
+    """An accessible search page does not match any known card layout."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,7 +159,7 @@ def _unscaled_image_url(image_url: str) -> str:
 def parse_ozon_cards(raw_cards: object) -> tuple[OzonProduct, ...]:
     """Validate browser-extracted fields while retaining search result order."""
     if not isinstance(raw_cards, list):
-        raise OzonError("Ozon изменил формат поисковой выдачи.")
+        raise OzonLayoutError("Ozon изменил формат поисковой выдачи.")
     result: list[OzonProduct] = []
     for position, card in enumerate(raw_cards[:_RESULT_LIMIT], 1):
         if not isinstance(card, dict):
@@ -141,19 +200,28 @@ def parse_ozon_cards(raw_cards: object) -> tuple[OzonProduct, ...]:
     return tuple(result)
 
 
-def parse_ozon_search(access: BrowserPageAccess) -> tuple[OzonProduct, ...]:
-    """Use direct selectors in the tab most recently opened by BrowserPageAccess."""
+def parse_ozon_search(
+    access: BrowserPageAccess, *, on_layout_change: Callable[[str], None] | None = None,
+) -> tuple[OzonProduct, ...]:
+    """Read product cards and report when fallback selectors were needed."""
     page = access.page
     try:
         try:
-            page.wait_for_function(_READY_CHECK, arg=_CARD_SELECTOR, timeout=12_000)
+            page.wait_for_function(_READY_CHECK, arg=_CARD_SELECTORS, timeout=12_000)
         except PlaywrightTimeoutError:
             pass
-        raw_cards = page.evaluate(_EXTRACT_CARDS, _CARD_SELECTOR)
+        raw_cards = page.evaluate(_EXTRACT_CARDS, _CARD_SELECTORS)
         if not raw_cards:
             if page.evaluate(_EMPTY_CHECK):
                 return ()
-            raise OzonError("В выдаче Ozon не найдены карточки товаров.")
-        return parse_ozon_cards(raw_cards)
+            raise OzonLayoutError("В выдаче Ozon не найдены карточки товаров; проверьте селекторы выдачи.")
+        try:
+            products = parse_ozon_cards(raw_cards)
+        except OzonError as error:
+            if browser_fallback_fields(raw_cards):
+                raise OzonLayoutError(f"Запасные селекторы Ozon не прочитали выдачу: {error}") from error
+            raise
+        report_layout_fallback(on_layout_change, browser_fallback_fields(raw_cards))
+        return products
     except PlaywrightError as error:
         raise OzonError(f"Не удалось прочитать выдачу Ozon: {error}") from error

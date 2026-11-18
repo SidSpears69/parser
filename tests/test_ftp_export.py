@@ -192,10 +192,49 @@ class FTPExportTests(unittest.TestCase):
         fake = MemoryFTP()
         fake.fail_image = True
         with patch("web_parser.ftp_export.FTP", return_value=fake):
-            with self.assertRaises(FTPExportError):
+            with self.assertRaises(FTPExportError) as caught:
                 export_run(SITE, self.links, self.results, self.images, SETTINGS, image_root=self.root)
         self.assertNotIn("/exports/processed_products.json", fake.files)
         self.assertTrue(fake.closed)
+        self.assertIn("передача фото", str(caught.exception))
+        self.assertIn("FTP 550", str(caught.exception))
+        self.assertNotIn(SETTINGS["password"], str(caught.exception))
+
+    def test_retries_one_broken_transfer_before_publishing_json(self):
+        class BrokenFirstTransfer(MemoryFTP):
+            def storbinary(self, command, source, *, callback=None):
+                if "/images/" in self._path(command.removeprefix("STOR ")):
+                    raise ConnectionResetError(10054, "connection reset")
+                super().storbinary(command, source, callback=callback)
+
+        first = BrokenFirstTransfer()
+        second = MemoryFTP()
+        with (
+            patch("web_parser.ftp_export.FTP", side_effect=(first, second)) as constructor,
+            patch("web_parser.ftp_export.sleep"),
+        ):
+            result = export_run(
+                SITE, self.links, self.results, self.images, SETTINGS, image_root=self.root,
+            )
+        self.assertEqual(constructor.call_count, 2)
+        self.assertTrue(first.closed)
+        self.assertTrue(second.closed)
+        self.assertEqual(result.uploaded_images, 1)
+        self.assertIn("/exports/processed_products.json", second.files)
+
+    def test_does_not_retry_ambiguous_json_publication_failure(self):
+        class FailedPublish(MemoryFTP):
+            def rename(self, source, target):
+                if source.startswith(".processed_products.json.uploading-"):
+                    raise ConnectionResetError(10054, "connection reset")
+                super().rename(source, target)
+
+        fake = FailedPublish()
+        with patch("web_parser.ftp_export.FTP", return_value=fake) as constructor:
+            with self.assertRaises(FTPExportError) as caught:
+                export_run(SITE, self.links, self.results, self.images, SETTINGS, image_root=self.root)
+        constructor.assert_called_once()
+        self.assertIn("публикация JSON", str(caught.exception))
 
     def test_slash_uses_ftp_root_as_base_directory(self):
         fake = MemoryFTP(home="/account-home")
