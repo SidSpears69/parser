@@ -29,6 +29,13 @@ if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
 if (-not (Test-Path -LiteralPath $versionPath -PathType Leaf)) {
     throw "Build version file is missing: $versionPath"
 }
+$firefoxBuilds = @(
+    Get-ChildItem -Path (Join-Path $buildDir 'ms-playwright\firefox-*\firefox\firefox.exe') `
+        -File -ErrorAction SilentlyContinue
+)
+if (-not $firefoxBuilds) {
+    throw 'Bundled Playwright Firefox is missing; rebuild the exe with -BundleFirefox.'
+}
 $builtVersion = (Get-Content -LiteralPath $versionPath -Raw -Encoding UTF8 | ConvertFrom-Json).version
 if ($builtVersion -ne $Version) {
     throw "Build version $builtVersion does not match installer version $Version."

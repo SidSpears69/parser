@@ -7,6 +7,8 @@ from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
+import re
+import sys
 from tempfile import TemporaryDirectory
 import time
 from typing import Callable
@@ -342,6 +344,12 @@ class BrowserPageAccess:
             if name == "Mozilla Firefox":
                 firefox = self._playwright.firefox
                 if not Path(firefox.executable_path).is_file():
+                    if getattr(sys, "frozen", False):
+                        raise BrowserAccessError(
+                            "Сборка Firefox отсутствует в установленном приложении. "
+                            "Переустановите Web Parser из актуального установщика; "
+                            "рядом с WebParser.exe должен быть каталог ms-playwright с Firefox."
+                        )
                     raise BrowserAccessError(
                         "Сборка Firefox для Playwright не установлена. Выполните "
                         ".\\.venv\\Scripts\\python.exe -m playwright install firefox."
@@ -610,20 +618,39 @@ class BrowserPageAccess:
             raise BrowserAccessError("Сначала откройте сеанс Playwright.")
         documents: list[object] = []
         candidate_responses: deque[Response] = deque()
-        search_query = parse_qs(urlsplit(url).query).get("search", [""])[0]
+        requested_parts = urlsplit(url)
+        requested_query = parse_qs(requested_parts.query)
+        search_query = requested_query.get("search", [""])[0]
+        brand_match = re.fullmatch(
+            r"/brands/(\d+)(?:-[^/]*)?/?", requested_parts.path, re.IGNORECASE,
+        )
 
-        def is_search_json(response: Response) -> bool:
+        def is_product_json(response: Response) -> bool:
             parts = urlsplit(response.url)
+            if response.status != 200 or parts.hostname not in {
+                "www.wildberries.ru", "u-search.wb.ru", "search.wb.ru", "u-catalog.wb.ru",
+            }:
+                return False
+            parameters = parse_qs(parts.query)
+            if brand_match is not None:
+                if not re.search(r"/brands/v\d+/catalog\Z", parts.path):
+                    return False
+                if parameters.get("brand") != [brand_match.group(1)]:
+                    return False
+                if parameters.get("page", ["1"]) != requested_query.get("page", ["1"]):
+                    return False
+                for key, values in requested_query.items():
+                    if (key == "sort" or re.fullmatch(r"f\d+", key)) and parameters.get(key) != values:
+                        return False
+                return True
             return (
-                response.status == 200
-                and parts.hostname in {"www.wildberries.ru", "u-search.wb.ru", "search.wb.ru"}
-                and "/exactmatch/" in parts.path
+                "/exactmatch/" in parts.path
                 and parts.path.endswith("/search")
-                and parse_qs(parts.query).get("query", [""])[0] == search_query
+                and parameters.get("query", [""])[0] == search_query
             )
 
         def capture(response: Response) -> None:
-            if is_search_json(response):
+            if is_product_json(response):
                 candidate_responses.append(response)
 
         def read_candidates() -> None:

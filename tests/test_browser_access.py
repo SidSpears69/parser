@@ -22,6 +22,10 @@ CHROME = BrowserInstallation("Google Chrome", BINARY)
 URL = "https://market.example/search?q=rope"
 OZON_URL = "https://www.ozon.ru/search/?text=rope"
 WILDBERRIES_URL = "https://www.wildberries.ru/catalog/0/search.aspx?search=rope"
+WILDBERRIES_BRAND_URL = (
+    "https://www.wildberries.ru/brands/312181720-sailmaster"
+    "?sort=popular&page=1&f14177449=11807341"
+)
 YANDEX_URL = "https://market.yandex.ru/search?text=rope"
 
 
@@ -292,6 +296,44 @@ class BrowserAccessTests(unittest.TestCase):
             document = access.fetch_wildberries_json(WILDBERRIES_URL)
         self.assertEqual(document, {"products": [{"id": 42}]})
         self.page.remove_listener.assert_called_once_with("response", listener[0])
+
+    def test_wildberries_brand_capture_matches_brand_and_filters(self):
+        endpoint = "https://www.wildberries.ru/__internal/u-catalog/brands/v4/catalog?"
+        wrong_brand = Mock(
+            status=200,
+            url=endpoint + "brand=123&sort=popular&f14177449=11807341",
+        )
+        wrong_filter = Mock(
+            status=200,
+            url=endpoint + "brand=312181720&sort=popular&f14177449=999",
+        )
+        wrong_page = Mock(
+            status=200,
+            url=endpoint + "brand=312181720&page=2&sort=popular&f14177449=11807341",
+        )
+        catalog = Mock(
+            status=200,
+            url=endpoint + "brand=312181720&sort=popular&f14177449=11807341",
+        )
+        catalog.body.return_value = b'{"products":[{"id":42}]}'
+        listeners = []
+        self.page.on.side_effect = lambda _event, callback: listeners.append(callback)
+
+        def navigate(*_args, **_kwargs):
+            for response in (wrong_brand, wrong_filter, wrong_page, catalog):
+                listeners[0](response)
+            return self.response
+
+        self.page.goto.side_effect = navigate
+        with self.access() as access:
+            document = access.fetch_wildberries_json(WILDBERRIES_BRAND_URL)
+        self.assertEqual(document, {"products": [{"id": 42}]})
+        wrong_brand.body.assert_not_called()
+        wrong_filter.body.assert_not_called()
+        wrong_page.body.assert_not_called()
+        self.page.goto.assert_called_once_with(
+            WILDBERRIES_BRAND_URL, wait_until="domcontentloaded", timeout=30_000,
+        )
 
     def test_wildberries_browser_fallback_uses_json_despite_498_html_check(self):
         api_response = Mock(
@@ -749,6 +791,15 @@ class BrowserAccessTests(unittest.TestCase):
                 pass
         self.playwright.firefox.launch.assert_not_called()
         self.playwright.stop.assert_called_once_with()
+
+    def test_missing_packaged_firefox_build_has_installer_hint(self):
+        firefox = BrowserInstallation("Mozilla Firefox", BINARY)
+        self.playwright.firefox.executable_path = str(BINARY.with_name("missing_firefox_build.exe"))
+        with patch("web_parser.browser_access.sys.frozen", True, create=True):
+            with self.assertRaisesRegex(BrowserAccessError, "Переустановите Web Parser"):
+                with BrowserPageAccess(firefox, 1):
+                    pass
+        self.playwright.firefox.launch.assert_not_called()
 
     def test_failed_firefox_stealth_setup_closes_partial_session(self):
         firefox = BrowserInstallation("Mozilla Firefox", BINARY)
