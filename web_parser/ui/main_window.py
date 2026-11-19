@@ -15,7 +15,7 @@ from web_parser.browser_discovery import discover_browsers
 from web_parser.email_notifications import EmailNotifier
 from web_parser.paths import ARTIFACT_ROOT
 from web_parser.ui.site import SitePage
-from web_parser.ui.update import UpdateThread
+from web_parser.ui.update import UpdateProgressDialog, UpdateThread
 from web_parser.ui.widgets import (
     ClickableCursorFilter, ReadableComboBox, ReadableSpinBox, field, form, label, section,
 )
@@ -192,6 +192,8 @@ class MainWindow(QMainWindow):
         self._browsers_scanned = False
         self._close_pending = False
         self._update_thread: UpdateThread | None = None
+        self._download_dialog: UpdateProgressDialog | None = None
+        self._update_cancel_requested = False
         self._update_release: Release | None = None
         self._update_installer: str | None = None
         self._pending_installer: str | None = None
@@ -520,6 +522,7 @@ class MainWindow(QMainWindow):
         self._update_release = None
         self._update_installer = None
         self._update_error = None
+        self._update_cancel_requested = False
         thread = UpdateThread(release, self)
         self._update_thread = thread
         thread.release_found.connect(self._release_found)
@@ -528,10 +531,22 @@ class MainWindow(QMainWindow):
         thread.failed.connect(self._update_failed)
         thread.finished.connect(self._update_finished)
         self.update_button.setEnabled(False)
+        if release is not None:
+            dialog = UpdateProgressDialog(self)
+            self._download_dialog = dialog
+            dialog.cancel_requested.connect(self._cancel_update_download)
+            dialog.show()
+            self.update_button.setText("Скачивание 0%")
         self.statusBar().showMessage(
             "Скачивание обновления…" if release is not None else "Проверка обновлений…"
         )
         thread.start()
+
+    @Slot()
+    def _cancel_update_download(self) -> None:
+        self._update_cancel_requested = True
+        if self._update_thread is not None:
+            self._update_thread.requestInterruption()
 
     @Slot(object)
     def _release_found(self, release: Release) -> None:
@@ -543,7 +558,12 @@ class MainWindow(QMainWindow):
 
     @Slot(int, int)
     def _download_progress(self, received: int, total: int) -> None:
-        self.statusBar().showMessage(f"Скачивание обновления: {received * 100 // total}%")
+        if self._download_dialog is not None:
+            self._download_dialog.show_progress(received, total)
+        if total > 0:
+            percent = min(100, received * 100 // total)
+            self.update_button.setText(f"Скачивание {percent}%")
+            self.statusBar().showMessage(f"Скачивание обновления: {percent}%")
 
     @Slot(str)
     def _update_failed(self, message: str) -> None:
@@ -557,15 +577,25 @@ class MainWindow(QMainWindow):
         was_download = thread.release is not None
         self._update_thread = None
         thread.deleteLater()
+        if self._download_dialog is not None:
+            self._download_dialog.accept()
+            self._download_dialog.deleteLater()
+            self._download_dialog = None
+        self.update_button.setText("Проверить обновления")
         if self._close_pending:
             self._resume_close()
             return
         self.update_button.setEnabled(True)
+        if self._update_cancel_requested:
+            self.statusBar().showMessage("Загрузка обновления отменена")
+            return
         if self._update_error:
+            self.statusBar().showMessage("Не удалось загрузить обновление")
             QMessageBox.warning(self, "Не удалось обновить приложение", self._update_error)
             return
         if was_download:
             if self._update_installer:
+                self.statusBar().showMessage("Установщик проверен. Запуск установки…")
                 self._launch_installer(self._update_installer)
             return
         release = self._update_release

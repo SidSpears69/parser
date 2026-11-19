@@ -33,6 +33,14 @@ class UpdateTests(TestCase):
             "sha256": self.digest,
         }
 
+    def _release(self) -> updates.Release:
+        return updates.Release(
+            "1.2.3", "v1.2.3", self.manifest["filename"],
+            "https://github.com/SidSpears69/parser/releases/download/"
+            "v1.2.3/WebParserSetup-1.2.3.exe",
+            len(self.installer), self.digest,
+        )
+
     def test_release_check_and_verified_download(self) -> None:
         payload = json.dumps(self.manifest).encode()
         folder = self._folder()
@@ -74,17 +82,26 @@ class UpdateTests(TestCase):
                 updates.latest_release()
 
     def test_rejects_corrupt_installer(self) -> None:
-        release = updates.Release(
-            "1.2.3", "v1.2.3", self.manifest["filename"],
-            "https://github.com/SidSpears69/parser/releases/download/"
-            "v1.2.3/WebParserSetup-1.2.3.exe",
-            len(self.installer), self.digest,
-        )
         folder = self._folder()
         with patch.object(updates, "urlopen", return_value=BytesIO(b"other-installer!")), \
                 patch.object(updates, "mkdtemp", return_value=str(folder)):
             with self.assertRaisesRegex(updates.UpdateError, "Контрольная сумма"):
-                updates.download_installer(release)
+                updates.download_installer(self._release())
+        self.assertFalse(folder.exists())
+
+    def test_cancel_after_last_chunk_removes_installer(self) -> None:
+        folder = self._folder()
+        checks = iter((False, False, True))
+
+        def cancelled() -> bool:
+            return next(checks)
+
+        with (
+            patch.object(updates, "urlopen", return_value=BytesIO(self.installer)),
+            patch.object(updates, "mkdtemp", return_value=str(folder)),
+        ):
+            with self.assertRaisesRegex(updates.UpdateError, "Загрузка отменена"):
+                updates.download_installer(self._release(), cancel_requested=cancelled)
         self.assertFalse(folder.exists())
 
     def test_installed_version_uses_packaged_manifest(self) -> None:

@@ -132,6 +132,8 @@ def download_installer(
     digest = hashlib.sha256()
     received = 0
     try:
+        if cancel_requested is not None and cancel_requested():
+            raise UpdateError("Загрузка отменена.")
         with (
             urlopen(_request(release.url, accept="application/octet-stream"), timeout=30) as response,
             destination.open("wb") as output,
@@ -146,6 +148,8 @@ def download_installer(
                 digest.update(chunk)
                 if progress is not None:
                     progress(received, release.size)
+        if cancel_requested is not None and cancel_requested():
+            raise UpdateError("Загрузка отменена.")
         if received != release.size or digest.hexdigest() != release.sha256:
             raise UpdateError("Контрольная сумма установщика не совпадает с релизом.")
         return destination
