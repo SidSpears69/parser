@@ -5,11 +5,13 @@ import tempfile
 from unittest.mock import patch
 
 from PySide6.QtCore import Qt, QTime
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QLineEdit
 
 from web_parser.browser_discovery import BrowserInstallation
 from web_parser.product_links import ProductLinks
 from web_parser.ui import SITES
+from web_parser.ui import MainWindow
 
 from .base import UiTestCase
 
@@ -154,6 +156,65 @@ class SettingsTests(UiTestCase):
             {site: page.settings() for site, page in self.window.pages.items()}, expected
         )
         self.assertEqual(self.window.proxy_settings(), expected_proxy)
+
+    def test_settings_survive_restart_without_manual_export(self):
+        page = self.window.pages[SITES[0]]
+        page.source_url.setText("https://example.org/products.json")
+        page.token.setText("private-token")
+        page.source_schedule_enabled.setChecked(True)
+        page.source_schedule_time.setTime(QTime(7, 15))
+        page.ftp_password.setText("ftp-secret")
+        self.window.proxy_enabled.setChecked(True)
+        self.window.proxy_server.setText("socks5://proxy.example:63397")
+        self.window.proxy_username.setText("proxy-user")
+        self.window.proxy_password.setText("proxy-secret")
+
+        settings_path = Path(self._log_directory.name) / "settings.json"
+        QTest.qWait(800)
+        self.assertTrue(settings_path.exists())
+        saved = settings_path.read_text(encoding="utf-8")
+        for secret in ("private-token", "ftp-secret", "proxy-secret"):
+            self.assertNotIn(secret, saved)
+
+        self.window.close()
+        reopened = MainWindow(log_root=Path(self._log_directory.name))
+        try:
+            restored = reopened.pages[SITES[0]]
+            self.assertEqual(restored.source_url.text(), "https://example.org/products.json")
+            self.assertEqual(restored.token.text(), "private-token")
+            self.assertEqual(restored.source_schedule_time.time(), QTime(7, 15))
+            self.assertTrue(restored.source_schedule_enabled.isChecked())
+            self.assertEqual(restored.ftp_password.text(), "ftp-secret")
+            self.assertEqual(reopened.proxy_settings(), self.window.proxy_settings())
+        finally:
+            reopened.close()
+
+    def test_imported_configuration_becomes_automatic_settings(self):
+        with tempfile.TemporaryDirectory() as folder:
+            exported = Path(folder) / "export.json"
+            self.window.pages[SITES[1]].token.setText("imported-token")
+            self.window.save_config_to(exported)
+            self.window.pages[SITES[1]].token.clear()
+            self.window.load_config_from(exported)
+            self.window.close()
+
+        reopened = MainWindow(log_root=Path(self._log_directory.name))
+        try:
+            self.assertEqual(reopened.pages[SITES[1]].token.text(), "imported-token")
+        finally:
+            reopened.close()
+
+    def test_closing_for_update_saves_pending_changes(self):
+        self.window.pages[SITES[2]].token.setText("last-second-token")
+        settings_path = Path(self._log_directory.name) / "settings.json"
+        self.window.close()
+        self.assertTrue(settings_path.exists())
+
+        reopened = MainWindow(log_root=Path(self._log_directory.name))
+        try:
+            self.assertEqual(reopened.pages[SITES[2]].token.text(), "last-second-token")
+        finally:
+            reopened.close()
 
     def test_proxy_fields_are_shared_and_disabled_until_enabled(self):
         self.assertFalse(self.window.proxy_enabled.isChecked())

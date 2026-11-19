@@ -1,5 +1,6 @@
 """Writable paths shared by source runs and packaged Windows builds."""
 
+import os
 from pathlib import Path
 import sys
 
@@ -12,3 +13,9 @@ def application_root() -> Path:
 
 
 ARTIFACT_ROOT = application_root() / "artifacts"
+
+
+def user_settings_path() -> Path:
+    """Keep settings outside the directory replaced by the installer."""
+    local_data = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
+    return local_data / "WebParser" / "settings.json"

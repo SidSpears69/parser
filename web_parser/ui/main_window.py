@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
 from web_parser import config
 from web_parser.browser_discovery import discover_browsers
 from web_parser.email_notifications import EmailNotifier
-from web_parser.paths import ARTIFACT_ROOT
+from web_parser.paths import ARTIFACT_ROOT, user_settings_path
 from web_parser.ui.site import SitePage
 from web_parser.ui.update import UpdateProgressDialog, UpdateThread
 from web_parser.ui.widgets import (
@@ -27,6 +27,9 @@ SITES = config.SITES
 class MainWindow(QMainWindow):
     def __init__(self, *, log_root: Path | None = None):
         super().__init__()
+        self._settings_path = (log_root / "settings.json") if log_root is not None else user_settings_path()
+        self._settings_dirty = False
+        self._loading_settings = False
         self.setWindowTitle("Web Parser — управление сбором данных")
         self.resize(1140, 900)
         self.setMinimumSize(850, 620)
@@ -57,8 +60,8 @@ class MainWindow(QMainWindow):
         self.load_config_button.setObjectName("loadConfig")
         self.save_config_button = QPushButton("Сохранить…")
         self.save_config_button.setObjectName("saveConfig")
-        self.load_config_button.setToolTip("Загрузить настройки всех вкладок из файла")
-        self.save_config_button.setToolTip("Сохранить настройки всех вкладок в файл")
+        self.load_config_button.setToolTip("Импортировать настройки всех вкладок из файла")
+        self.save_config_button.setToolTip("Экспортировать настройки всех вкладок в файл")
         config_layout.addWidget(self.load_config_button)
         config_layout.addWidget(self.save_config_button)
 
@@ -235,6 +238,12 @@ class MainWindow(QMainWindow):
         self.load_config_button.clicked.connect(self._choose_load_config)
         self.update_button.clicked.connect(self._check_updates)
         self._refresh_browsers()
+        self._settings_timer = QTimer(self)
+        self._settings_timer.setSingleShot(True)
+        self._settings_timer.setInterval(700)
+        self._settings_timer.timeout.connect(self._save_settings_automatically)
+        self._load_settings_automatically()
+        self._connect_settings_changes()
         self._clickable_cursor_filter = ClickableCursorFilter(self)
         clickable_widgets = (
             *self.findChildren(QAbstractButton),
@@ -276,6 +285,9 @@ class MainWindow(QMainWindow):
         for page in self.pages.values():
             page.prepare_walk_shutdown()
             page.shutdown_links()
+        if self._settings_dirty:
+            self._settings_timer.stop()
+            self._save_settings_automatically()
         self.email_notifier.close()
         super().closeEvent(event)
 
@@ -295,19 +307,86 @@ class MainWindow(QMainWindow):
         )
         self.statusBar().showMessage(f"Настройки сохранены в {Path(path).name}")
 
+    def _load_settings_automatically(self) -> None:
+        if not self._settings_path.exists():
+            return
+        try:
+            self.load_config_from(self._settings_path)
+        except (OSError, ValueError) as error:
+            self.statusBar().showMessage(f"Не удалось загрузить сохранённые настройки: {error}")
+        else:
+            self._settings_timer.stop()
+            self._settings_dirty = False
+
+    def _connect_settings_changes(self) -> None:
+        for page in self.pages.values():
+            for widget in (
+                page.source_url, page.token, page.ftp_host, page.ftp_user,
+                page.ftp_password, page.remote_path,
+            ):
+                widget.textChanged.connect(self._schedule_settings_save)
+            for widget in (
+                page.ftp_port, page.pause, page.source_schedule_interval, page.interval,
+            ):
+                widget.valueChanged.connect(self._schedule_settings_save)
+            for widget in (page.browser, page.source_schedule_unit, page.interval_unit):
+                widget.currentIndexChanged.connect(self._schedule_settings_save)
+            for widget in (page.source_schedule_enabled, page.schedule_enabled):
+                widget.toggled.connect(self._schedule_settings_save)
+            for widget in (page.source_schedule_time, page.start_time):
+                widget.timeChanged.connect(self._schedule_settings_save)
+        for widget in (
+            self.proxy_server, self.proxy_username, self.proxy_password,
+            self.email_host, self.email_username, self.email_password,
+            self.email_sender, self.email_recipient, self.email_recipient2,
+        ):
+            widget.textChanged.connect(self._schedule_settings_save)
+        self.email_port.valueChanged.connect(self._schedule_settings_save)
+        self.email_security.currentIndexChanged.connect(self._schedule_settings_save)
+        for widget in (self.proxy_enabled, self.email_enabled):
+            widget.toggled.connect(self._schedule_settings_save)
+
+    @Slot()
+    def _schedule_settings_save(self) -> None:
+        if self._loading_settings:
+            return
+        self._settings_dirty = True
+        self._settings_timer.start()
+
+    @Slot()
+    def _save_settings_automatically(self) -> None:
+        if not self._settings_dirty:
+            return
+        try:
+            self._settings_path.parent.mkdir(parents=True, exist_ok=True)
+            config.save(
+                self._settings_path,
+                {site: page.settings() for site, page in self.pages.items()},
+                self.proxy_settings(), self.email_settings(),
+            )
+        except (OSError, ValueError) as error:
+            self.statusBar().showMessage(f"Не удалось сохранить настройки: {error}")
+        else:
+            self._settings_dirty = False
+
     def load_config_from(self, path: str | Path) -> None:
         if any(page.walk_pending for page in self.pages.values()):
             raise ValueError("Остановите обход страниц перед загрузкой настроек.")
         loaded = config.load_document(path)
         if set(loaded.sites) != set(SITES):
             raise ValueError("Файл должен содержать настройки всех четырёх сайтов")
-        for site in SITES:
-            self.pages[site].apply_settings(loaded.sites[site])
-        self._apply_proxy_settings(loaded.proxy)
-        self._apply_email_settings(loaded.email)
-        if self._emergency_stopped:
-            for page in self.pages.values():
-                page.emergency_stop()
+        self._loading_settings = True
+        try:
+            for site in SITES:
+                self.pages[site].apply_settings(loaded.sites[site])
+            self._apply_proxy_settings(loaded.proxy)
+            self._apply_email_settings(loaded.email)
+            if self._emergency_stopped:
+                for page in self.pages.values():
+                    page.emergency_stop()
+        finally:
+            self._loading_settings = False
+        self._schedule_settings_save()
         self.statusBar().showMessage(f"Настройки загружены из {Path(path).name}")
 
     def proxy_settings(self) -> dict[str, str | bool]:
