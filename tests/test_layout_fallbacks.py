@@ -1,6 +1,7 @@
 """Rendered fallback card extraction and layout change notices."""
 
 from decimal import Decimal
+import json
 from types import SimpleNamespace
 from typing import cast
 import unittest
@@ -13,14 +14,14 @@ from web_parser.yandex_market import parse_yandex_search
 
 
 class LayoutFallbackTests(unittest.TestCase):
-    def test_yandex_missing_discount_is_reported_only_for_a_different_visible_price(self) -> None:
+    def test_yandex_optional_discount_does_not_trigger_layout_notice(self) -> None:
         with sync_playwright() as playwright:
             browser = playwright.firefox.launch(headless=True)
             try:
                 page = browser.new_page()
                 access = cast(BrowserPageAccess, SimpleNamespace(page=page))
                 markup = """
-                    <article data-zone-name="productSnippet" data-zone-data='{"price":1200}'>
+                    <article data-zone-name="productSnippet" data-zone-data='CARD_DATA'>
                         <a href="/product--shnur/123">
                             <h3 data-auto="snippet-title">Шнур яхтенный</h3>
                             <div data-auto="galleryLink">
@@ -30,12 +31,19 @@ class LayoutFallbackTests(unittest.TestCase):
                         <span data-auto="snippet-price-current">CURRENT_PRICE ₽</span>
                     </article>
                 """
-                for visible, discounted, expected_warning in (
-                    ("1 200", Decimal("1200"), False),
-                    ("900", Decimal("900"), True),
+                for details, visible, discounted, expected_warning in (
+                    ({"price": 1200}, "1 200", Decimal("1200"), False),
+                    ({"price": 1200}, "900", Decimal("900"), False),
+                    ({"price": 1200, "additionalPrices": [
+                        {"priceType": "withDiscount", "priceValue": None},
+                    ]}, "900", Decimal("900"), True),
+                    ({"price": 1200, "additionalPrices": [
+                        {"priceType": "withDiscount", "priceValue": 900},
+                    ]}, "900", Decimal("900"), False),
                 ):
-                    with self.subTest(visible=visible):
-                        page.set_content(markup.replace("CURRENT_PRICE", visible), wait_until="domcontentloaded")
+                    with self.subTest(details=details, visible=visible):
+                        html = markup.replace("CARD_DATA", json.dumps(details))
+                        page.set_content(html.replace("CURRENT_PRICE", visible), wait_until="domcontentloaded")
                         notices: list[str] = []
                         products = parse_yandex_search(access, on_layout_change=notices.append)
                         self.assertEqual(products[0].price, Decimal("1200"))

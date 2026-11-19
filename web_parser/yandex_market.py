@@ -80,11 +80,7 @@ _EXTRACT_CARDS = """(selectors) => {
         const price = declaredPrice ?? oldPrice ?? currentPrice;
         const discounted = declaredDiscount ?? currentPrice ?? price;
         if (declaredPrice == null && price != null) fallbacks.push('цена из DOM');
-        const declaredPriceText = declaredPrice == null ? null : money(String(declaredPrice));
-        const currentMatchesDeclared = declaredPriceText != null && currentPrice != null
-            && Number(declaredPriceText) === Number(currentPrice);
-        if (declaredDiscount == null && currentPrice != null && declaredPrice != null
-                && !currentMatchesDeclared)
+        if (discount && declaredDiscount == null && currentPrice != null)
             fallbacks.push('цена со скидкой из DOM');
         const primaryName = card.querySelector('[data-auto="snippet-title"]')?.textContent?.trim();
         const name = text('название', ['[data-auto="snippet-title"]', 'h3', 'h2'])
