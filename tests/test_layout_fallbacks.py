@@ -13,6 +13,39 @@ from web_parser.yandex_market import parse_yandex_search
 
 
 class LayoutFallbackTests(unittest.TestCase):
+    def test_yandex_missing_discount_is_reported_only_for_a_different_visible_price(self) -> None:
+        with sync_playwright() as playwright:
+            browser = playwright.firefox.launch(headless=True)
+            try:
+                page = browser.new_page()
+                access = cast(BrowserPageAccess, SimpleNamespace(page=page))
+                markup = """
+                    <article data-zone-name="productSnippet" data-zone-data='{"price":1200}'>
+                        <a href="/product--shnur/123">
+                            <h3 data-auto="snippet-title">Шнур яхтенный</h3>
+                            <div data-auto="galleryLink">
+                                <img src="https://avatars.mds.yandex.net/get-mpic/123/1/orig">
+                            </div>
+                        </a>
+                        <span data-auto="snippet-price-current">CURRENT_PRICE ₽</span>
+                    </article>
+                """
+                for visible, discounted, expected_warning in (
+                    ("1 200", Decimal("1200"), False),
+                    ("900", Decimal("900"), True),
+                ):
+                    with self.subTest(visible=visible):
+                        page.set_content(markup.replace("CURRENT_PRICE", visible), wait_until="domcontentloaded")
+                        notices: list[str] = []
+                        products = parse_yandex_search(access, on_layout_change=notices.append)
+                        self.assertEqual(products[0].price, Decimal("1200"))
+                        self.assertEqual(products[0].discounted_price, discounted)
+                        self.assertEqual(bool(notices), expected_warning)
+                        if expected_warning:
+                            self.assertIn("цена со скидкой из DOM", notices[0])
+            finally:
+                browser.close()
+
     def test_alternate_ozon_and_yandex_markup_is_reported(self) -> None:
         with sync_playwright() as playwright:
             browser = playwright.firefox.launch(headless=True)
