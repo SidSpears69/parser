@@ -6,6 +6,7 @@ import time
 from unittest.mock import patch
 
 from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QScrollArea
 
 from web_parser.browser_access import (
     BrowserAccessCancelled, BrowserAccessDenied, BrowserAccessError,
@@ -198,7 +199,8 @@ class WalkTests(UiTestCase):
         self.window.resize(1440, 900)
         self.window.show()
         self.app.processEvents()
-        scroll = self.window.tabs.currentWidget()
+        scroll = self.window.tabs.currentWidget().findChild(QScrollArea)
+        self.assertIsNotNone(scroll)
         browser_panel = page.run_status.parentWidget()
         initial_panel_width = browser_panel.width()
         initial_horizontal_scroll = scroll.horizontalScrollBar().maximum()

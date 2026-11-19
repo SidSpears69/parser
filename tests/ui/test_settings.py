@@ -4,9 +4,9 @@ from pathlib import Path
 import tempfile
 from unittest.mock import patch
 
-from PySide6.QtCore import Qt, QTime
+from PySide6.QtCore import QPoint, Qt, QTime
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QLineEdit
+from PySide6.QtWidgets import QLineEdit, QScrollArea
 
 from web_parser.browser_discovery import BrowserInstallation
 from web_parser.product_links import ProductLinks
@@ -48,6 +48,25 @@ class SettingsTests(UiTestCase):
         self.assertEqual(first.settings()["source_schedule_unit"], "weeks")
         self.assertEqual(second.settings()["source_schedule_interval"], 4)
         self.assertNotEqual(first.settings()["source_url"], second.settings()["source_url"])
+
+    def test_run_controls_stay_visible_while_site_content_scrolls(self):
+        self.window.resize(850, 620)
+        self.window.show()
+        self.app.processEvents()
+        page = self.window.pages[SITES[0]]
+        tab = self.window.tabs.widget(0)
+        self.assertIs(page.run_toolbar.parentWidget(), tab)
+        scroll = tab.findChild(QScrollArea)
+        self.assertIsNotNone(scroll)
+        self.assertIs(scroll.widget(), page)
+        initial_y = page.run_toolbar.mapTo(tab, QPoint(0, 0)).y()
+        bar = scroll.verticalScrollBar()
+        self.assertGreater(bar.maximum(), 0)
+        bar.setValue(bar.maximum())
+        self.app.processEvents()
+        self.assertEqual(page.run_toolbar.mapTo(tab, QPoint(0, 0)).y(), initial_y)
+        self.assertTrue(page.start_button.isVisible())
+        self.assertTrue(page.stop_button.isVisible())
 
     def test_schedule_toggle_and_secret_fields(self):
         page = self.window.pages[SITES[0]]

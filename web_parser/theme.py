@@ -24,6 +24,8 @@ QTabBar::tab {
 QTabBar::tab:selected { color: #245fd2; border-bottom: 3px solid #245fd2; }
 QTabBar::tab:hover:!selected { background: #eaf0f8; }
 QWidget#sitePage, QScrollArea, QScrollArea > QWidget > QWidget { background: white; }
+QWidget#siteTab, QWidget#runToolbar { background: white; }
+QWidget#runToolbar { border-bottom: 1px solid #e0e6ef; }
 QScrollArea { border: none; }
 QScrollArea#settingsScroll, QScrollArea#settingsScroll > QWidget,
 QScrollArea#settingsScroll > QWidget > QWidget { background: #f3f5f9; }

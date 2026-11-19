@@ -89,7 +89,10 @@ class SitePageBase(QWidget):
         layout.setContentsMargins(20, 16, 20, 18)
         layout.setSpacing(14)
 
-        toolbar = QHBoxLayout()
+        self.run_toolbar = QWidget()
+        self.run_toolbar.setObjectName("runToolbar")
+        toolbar = QHBoxLayout(self.run_toolbar)
+        toolbar.setContentsMargins(20, 12, 20, 12)
         toolbar.addWidget(label("Сбор данных", "sectionTitle"))
         self.state_label = label("Не запущен", "state")
         toolbar.addWidget(self.state_label)
@@ -101,7 +104,6 @@ class SitePageBase(QWidget):
         self.stop_button.setEnabled(False)
         toolbar.addWidget(self.start_button)
         toolbar.addWidget(self.stop_button)
-        layout.addLayout(toolbar)
 
         grid = QGridLayout()
         grid.setSpacing(12)

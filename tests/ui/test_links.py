@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QScrollArea
 
 from web_parser.product_links import ProductLinks, ProductLinksError
 from web_parser.ui import SITES
@@ -93,7 +94,9 @@ class LinksTests(UiTestCase):
         )])
         self.window.show()
         table = page.links_preview
-        self.window.tabs.currentWidget().ensureWidgetVisible(table)
+        scroll = self.window.tabs.currentWidget().findChild(QScrollArea)
+        self.assertIsNotNone(scroll)
+        scroll.ensureWidgetVisible(table)
         self.app.processEvents()
 
         self.assertAlmostEqual(table.columnWidth(0), table.viewport().width() // 16, delta=2)
