@@ -56,10 +56,12 @@ class YandexCaptchaAccessTests(unittest.TestCase):
         solver.assert_called_once()
 
     @patch.dict("os.environ", {"WEB_PARSER_2CAPTCHA_API_KEY": "test-key"})
-    @patch("web_parser.browser_access.page.solve_yandex_captcha", side_effect=CaptchaServiceCancelled())
     def test_cancel_stops_the_walk(self):
         self.page.evaluate.return_value = True
-        with self.assertRaises(BrowserAccessCancelled):
+        with (
+            patch("web_parser.browser_access.page.solve_yandex_captcha", side_effect=CaptchaServiceCancelled()),
+            self.assertRaises(BrowserAccessCancelled),
+        ):
             self.access.fetch(URL)
 
     @patch.dict("os.environ", {"WEB_PARSER_2CAPTCHA_API_KEY": "test-key"})

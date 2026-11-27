@@ -47,34 +47,36 @@ class YandexCaptchaTests(unittest.TestCase):
         self.assertEqual(self.main.click.call_args_list[1].kwargs["position"], {"x": 25, "y": 10})
         self.page.request.get.assert_not_called()
 
-    @patch("web_parser.yandex_captcha.solve_yandex_coordinates", return_value=[(320, 0)])
     def test_out_of_bounds_coordinates_do_not_click(self):
-        self.assertFalse(self.solve())
+        with patch("web_parser.yandex_captcha.solve_yandex_coordinates", return_value=[(320, 0)]):
+            self.assertFalse(self.solve())
         self.main.click.assert_not_called()
 
-    @patch("web_parser.yandex_captcha.solve_yandex_coordinates", return_value=[(30, 40)])
     def test_refreshed_pixels_with_same_url_are_not_clicked(self):
         self.main.screenshot.side_effect = [b"old image", b"new image"]
-        self.assertFalse(self.solve())
+        with patch("web_parser.yandex_captcha.solve_yandex_coordinates", return_value=[(30, 40)]):
+            self.assertFalse(self.solve())
         self.main.click.assert_not_called()
 
-    @patch("web_parser.yandex_captcha.solve_yandex_coordinates", return_value=[(30, 40)])
     def test_changed_url_is_not_clicked(self):
         old = self.main.evaluate.return_value
         self.main.evaluate.side_effect = [old, {**old, "src": data(b"new")}]
-        self.assertFalse(self.solve())
+        with patch("web_parser.yandex_captcha.solve_yandex_coordinates", return_value=[(30, 40)]):
+            self.assertFalse(self.solve())
         self.main.click.assert_not_called()
 
-    @patch("web_parser.yandex_captcha.solve_yandex_coordinates", return_value=[(30, 40)])
     def test_solution_requires_real_page_result(self):
         self.page.evaluate.side_effect = None
         self.page.evaluate.return_value = False
-        self.assertFalse(self.solve())
+        with patch("web_parser.yandex_captcha.solve_yandex_coordinates", return_value=[(30, 40)]):
+            self.assertFalse(self.solve())
         self.assertEqual(self.page.wait_for_timeout.call_count, 40)
 
-    @patch("web_parser.yandex_captcha.solve_yandex_coordinates", side_effect=CaptchaServiceError("error"))
     def test_service_errors_propagate(self):
-        with self.assertRaises(CaptchaServiceError):
+        with (
+            patch("web_parser.yandex_captcha.solve_yandex_coordinates", side_effect=CaptchaServiceError("error")),
+            self.assertRaises(CaptchaServiceError),
+        ):
             self.solve()
 
     def test_cancel_is_preserved(self):
