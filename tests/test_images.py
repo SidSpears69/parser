@@ -8,7 +8,7 @@ from unittest.mock import Mock
 
 from playwright.sync_api import Error as PlaywrightError
 
-from web_parser.images import ImageDownloadCancelled, ImageStore
+from web_parser.images import ImageDownloadCancelled, ImageRequestContextClosed, ImageStore
 
 
 OZON_IMAGE = "https://ir.ozone.ru/s3/photo.jpg"
@@ -158,6 +158,23 @@ class ImageStoreTests(unittest.TestCase):
         )
         self.assertIn("ECONNREFUSED", failed.failed[0].reason)
         self.assertNotIn("secret", failed.failed[0].reason)
+
+    def test_closed_request_context_stops_batch_without_retries_or_fallback(self):
+        fallback = Mock()
+        sleep = Mock()
+        store = ImageStore(lambda: self.request, self.root, sleep=sleep, fallback_request_provider=fallback)
+        self.request.get.side_effect = PlaywrightError(
+            "APIRequestContext.get: Target page, context or browser has been closed."
+        )
+
+        with self.assertRaises(ImageRequestContextClosed):
+            store.save_products(
+                "sail-master.ru", "1473", "Wildberries",
+                [Product(WB_IMAGE), Product(WB_IMAGE)], "https://www.wildberries.ru/catalog/0/search.aspx?search=rope",
+            )
+        self.request.get.assert_called_once()
+        fallback.assert_not_called()
+        sleep.assert_not_called()
 
     def test_wildberries_images_retry_directly_after_proxy_404_or_connection_error(self):
         direct = Mock()

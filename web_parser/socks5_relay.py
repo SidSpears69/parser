@@ -40,6 +40,20 @@ def _recv_exact(stream: socket.socket, size: int) -> bytes:
     return bytes(data)
 
 
+def responds_to_socks5_greeting(
+    endpoint: tuple[str, int], *, authenticated: bool, timeout: float,
+) -> bool:
+    """Check that a proxy answers SOCKS5 before sending credentials or a destination."""
+    method = _METHOD_USERNAME_PASSWORD if authenticated else _METHOD_NO_AUTH
+    try:
+        with socket.create_connection(endpoint, timeout=timeout) as stream:
+            stream.sendall(bytes((_SOCKS_VERSION, 1, method)))
+            version, _ = _recv_exact(stream, 2)
+            return version == _SOCKS_VERSION
+    except OSError:
+        return False
+
+
 def _address_tail(stream: socket.socket, address_type: int) -> bytes:
     if address_type == _ATYP_IPV4:
         return _recv_exact(stream, 4 + 2)

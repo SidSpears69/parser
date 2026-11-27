@@ -4,6 +4,7 @@ from decimal import Decimal
 import unittest
 from unittest.mock import Mock
 
+from web_parser.browser_access import YandexCaptchaDenied
 from web_parser.yandex_market import (
     YandexMarketError, parse_yandex_cards, parse_yandex_search,
 )
@@ -69,6 +70,14 @@ class YandexMarketTests(unittest.TestCase):
         access = Mock(page=page)
         with self.assertRaisesRegex(YandexMarketError, "не найдены карточки"):
             parse_yandex_search(access)
+
+    def test_captcha_after_navigation_is_reported_before_card_extraction(self):
+        access = Mock()
+        access.check_yandex_captcha.side_effect = YandexCaptchaDenied(None, "Обнаружена капча Яндекс Маркета.")
+        with self.assertRaises(YandexCaptchaDenied):
+            parse_yandex_search(access)
+        access.page.wait_for_selector.assert_called_once()
+        access.page.evaluate.assert_not_called()
 
 
 if __name__ == "__main__":

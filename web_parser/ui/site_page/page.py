@@ -8,14 +8,15 @@ from PySide6.QtCore import QTime
 from PySide6.QtWidgets import QWidget
 
 from web_parser.scheduler import Schedule
+from web_parser.proxy_pool import WalkProxyRoutes
 from web_parser.ui.site_page.walk import SiteWalkPage
 
 
 class SitePage(SiteWalkPage):
     def __init__(
         self, site: str, parent: QWidget | None = None,
-        *, proxy_provider: Callable[[], dict[str, str] | None] = lambda: None,
-        proxy_secrets: Callable[[], tuple[str, str]] = lambda: ("", ""),
+        *, proxy_provider: Callable[[], WalkProxyRoutes | None] = lambda: None,
+        proxy_secrets: Callable[[], tuple[str, ...]] = lambda: (),
         extra_secrets: Callable[[], tuple[str, ...]] = lambda: (),
         log_root: Path | None = None,
     ):

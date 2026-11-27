@@ -9,7 +9,7 @@ import time
 from types import SimpleNamespace
 from typing import cast
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from PySide6.QtWidgets import QApplication
 from PySide6.QtTest import QTest
@@ -183,7 +183,7 @@ class EmergencyStopTests(unittest.TestCase):
                 return False
 
             @staticmethod
-            def fetch(url):
+            def fetch(url, **_kwargs):
                 visited.append(url)
                 return PageSnapshot(url, url, 200, "<html>cards</html>", 1)
 
@@ -242,7 +242,7 @@ class EmergencyStopTests(unittest.TestCase):
             "price": None, "discounted_price": None, "_layout_fallbacks": ["цена"],
         }
         with self.assertRaises(YandexMarketLayoutError):
-            parse_yandex_search(cast(BrowserPageAccess, SimpleNamespace(page=Page([yandex_card]))))
+            parse_yandex_search(Mock(spec=BrowserPageAccess, page=Page([yandex_card])))
 
     def test_recorded_error_reaches_configured_admin_email(self):
         with tempfile.TemporaryDirectory() as folder:

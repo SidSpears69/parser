@@ -2,10 +2,12 @@
 
 from unittest.mock import patch
 
-from web_parser.browser_access import PageSnapshot
+from web_parser.browser_access import BrowserFetchFailed, PageSnapshot
 from web_parser.ftp_export import FTPExportError, FTPExportResult
+from web_parser.images import ImageBatch, ImageFailure
 from web_parser.product_links import ProductLinks
 from web_parser.ui import SITES
+from web_parser.wildberries import WildberriesError
 
 from .base import UiTestCase
 
@@ -23,7 +25,7 @@ class FTPPageTests(UiTestCase):
         self.page.ftp_password.setText("secret-ftp-password")
         self.page.remote_path.setText("/exports")
 
-    def _walk(self, exporter):
+    def _walk(self, exporter=None, *, failed_urls: tuple[str, ...] = ()):
         class FakeAccess:
             def __init__(self, *_args, **_kwargs):
                 pass
@@ -35,11 +37,15 @@ class FTPPageTests(UiTestCase):
                 pass
 
             @staticmethod
-            def fetch(url):
+            def fetch(url, **_kwargs):
+                if url in failed_urls:
+                    raise BrowserFetchFailed("Не удалось загрузить страницу.")
                 return PageSnapshot(url, url, 200, "<html>Товар</html>", 1)
 
             @staticmethod
-            def fetch_wildberries_json(_url):
+            def fetch_wildberries_json(url):
+                if url in failed_urls:
+                    raise BrowserFetchFailed("Не удалось загрузить страницу Wildberries.")
                 return {"products": []}
 
         with (
@@ -49,6 +55,12 @@ class FTPPageTests(UiTestCase):
             self.page.start_button.click()
             self._wait_for_walk(self.page)
         return upload
+
+    def _assert_ftp_skipped(self, upload) -> None:
+        upload.assert_not_called()
+        for text in (self.page.ftp_status.text(), self.page.log.editor.toPlainText()):
+            self.assertIn("Выгрузка пропущена", text)
+            self.assertIn("Предыдущие данные на сервере сохранены", text)
 
     def test_successful_upload_receives_current_results_and_is_shown(self):
         upload = self._walk(lambda *_args, **_kwargs: FTPExportResult(
@@ -73,3 +85,30 @@ class FTPPageTests(UiTestCase):
         self.assertIn("FTP: ошибка выгрузки", self.page.run_status.text())
         self.assertIn("FTP отклонил запись файла", self.page.log.editor.toPlainText())
         self.assertNotIn("secret-ftp-password", self.page.log.editor.toPlainText())
+
+    def test_all_pages_unavailable_keeps_previous_publication(self):
+        links = self.page.product_links[0]
+        with patch(
+            "web_parser.ui.workers.WildberriesClient.fetch",
+            side_effect=WildberriesError("Не удалось получить данные Wildberries."),
+        ):
+            upload = self._walk(failed_urls=(links.ozon_url, links.wildberries_url, links.yandex_market_url))
+        self.assertIn("Загружено: 0; ошибок: 3", self.page.run_status.text())
+        self._assert_ftp_skipped(upload)
+
+    def test_partial_results_keep_previous_publication(self):
+        upload = self._walk(failed_urls=(self.page.product_links[0].ozon_url,))
+        self.assertIn("Загружено: 2; ошибок: 1", self.page.run_status.text())
+        self.assertTrue(self.page.wildberries_results["1473"])
+        self._assert_ftp_skipped(upload)
+
+    def test_missing_photo_keeps_previous_publication_after_successful_pages(self):
+        incomplete = ImageBatch((), (ImageFailure(1, "https://images.example/product.jpg", "Сбой загрузки"),))
+        with patch(
+            "web_parser.ui.workers.ImageStore.save_products",
+            side_effect=(incomplete, ImageBatch((), ()), ImageBatch((), ())),
+        ):
+            upload = self._walk()
+        self.assertIn("Загружено: 3; ошибок: 0", self.page.run_status.text())
+        self.assertIn("ошибок фото: 1", self.page.run_status.text())
+        self._assert_ftp_skipped(upload)

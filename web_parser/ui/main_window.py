@@ -14,6 +14,8 @@ from web_parser import config
 from web_parser.browser_discovery import discover_browsers
 from web_parser.email_notifications import EmailNotifier
 from web_parser.paths import ARTIFACT_ROOT, user_settings_path
+from web_parser.proxy_pool import ProxyPool, WalkProxyRoutes
+from web_parser.ui.proxy import ProxyPoolEditor
 from web_parser.ui.site import SitePage
 from web_parser.ui.update import UpdateProgressDialog, UpdateThread
 from web_parser.ui.widgets import (
@@ -30,6 +32,7 @@ class MainWindow(QMainWindow):
         self._settings_path = (log_root / "settings.json") if log_root is not None else user_settings_path()
         self._settings_dirty = False
         self._loading_settings = False
+        self._proxy_pool = ProxyPool()
         self.setWindowTitle("Web Parser — управление сбором данных")
         self.resize(1140, 900)
         self.setMinimumSize(850, 620)
@@ -78,24 +81,22 @@ class MainWindow(QMainWindow):
         self.settings_scroll.setWidget(self.settings_container)
         settings_layout.addLayout(config_layout)
 
-        self.proxy_section, proxy_layout = section("Прокси для браузера")
-        self.proxy_enabled = QCheckBox("Использовать прокси при обходе маркетплейсов")
-        self.proxy_enabled.setObjectName("proxyEnabled")
-        proxy_layout.addWidget(self.proxy_enabled)
-        proxy_form = form()
-        self.proxy_server = field("Протокол, адрес и порт прокси", "proxyServer")
-        self.proxy_username = field("Логин (если требуется)", "proxyUsername")
-        self.proxy_password = field("Пароль (если требуется)", "proxyPassword", secret=True)
-        credentials = QHBoxLayout()
-        credentials.addWidget(self.proxy_username)
-        credentials.addWidget(self.proxy_password)
-        self.proxy_username.setAccessibleName("Логин прокси")
-        self.proxy_password.setAccessibleName("Пароль прокси")
-        proxy_form.addRow("Адрес", self.proxy_server)
-        proxy_form.addRow("Логин / пароль", credentials)
-        proxy_layout.addLayout(proxy_form)
-        self.proxy_enabled.toggled.connect(self._toggle_proxy)
-        self._toggle_proxy(False)
+        self.proxy_settings_button = QPushButton("Параметры прокси…")
+        self.proxy_settings_button.setCheckable(True)
+        self.proxy_section, proxy_layout = section(
+            "Пул прокси для браузера", header_action=self.proxy_settings_button,
+        )
+        self.proxy_details = QWidget()
+        proxy_details_layout = QVBoxLayout(self.proxy_details)
+        proxy_details_layout.setContentsMargins(0, 0, 0, 0)
+        proxy_hint = label("Оставьте неиспользуемые слоты пустыми.", "hint")
+        proxy_hint.setWordWrap(True)
+        proxy_details_layout.addWidget(proxy_hint)
+        self.proxy_editor = ProxyPoolEditor()
+        proxy_details_layout.addWidget(self.proxy_editor)
+        proxy_layout.addWidget(self.proxy_details)
+        self.proxy_details.hide()
+        self.proxy_settings_button.toggled.connect(self._toggle_proxy_details)
         settings_layout.addWidget(self.proxy_section)
 
         self.email_section, email_layout = section("Уведомления по почте")
@@ -206,8 +207,8 @@ class MainWindow(QMainWindow):
         for site in SITES:
             page = SitePage(
                 site,
-                proxy_provider=self._browser_proxy,
-                proxy_secrets=lambda: (self.proxy_username.text(), self.proxy_password.text()),
+                proxy_provider=self.browser_proxy_routes,
+                proxy_secrets=self.proxy_editor.secrets,
                 extra_secrets=lambda: (self.email_password.text(),),
                 log_root=log_root,
             )
@@ -343,15 +344,14 @@ class MainWindow(QMainWindow):
             for widget in (page.source_schedule_time, page.start_time):
                 widget.timeChanged.connect(self._schedule_settings_save)
         for widget in (
-            self.proxy_server, self.proxy_username, self.proxy_password,
             self.email_host, self.email_username, self.email_password,
             self.email_sender, self.email_recipient, self.email_recipient2,
         ):
             widget.textChanged.connect(self._schedule_settings_save)
         self.email_port.valueChanged.connect(self._schedule_settings_save)
         self.email_security.currentIndexChanged.connect(self._schedule_settings_save)
-        for widget in (self.proxy_enabled, self.email_enabled):
-            widget.toggled.connect(self._schedule_settings_save)
+        self.proxy_editor.changed.connect(self._schedule_settings_save)
+        self.email_enabled.toggled.connect(self._schedule_settings_save)
 
     @Slot()
     def _schedule_settings_save(self) -> None:
@@ -386,7 +386,7 @@ class MainWindow(QMainWindow):
         try:
             for site in SITES:
                 self.pages[site].apply_settings(loaded.sites[site])
-            self._apply_proxy_settings(loaded.proxy)
+            self._apply_proxy_settings(loaded.proxy_pool)
             self._apply_email_settings(loaded.email)
             if self._emergency_stopped:
                 for page in self.pages.values():
@@ -396,22 +396,14 @@ class MainWindow(QMainWindow):
         self._schedule_settings_save()
         self.statusBar().showMessage(f"Настройки загружены из {Path(path).name}")
 
-    def proxy_settings(self) -> dict[str, str | bool]:
-        return {
-            "enabled": self.proxy_enabled.isChecked(),
-            "server": self.proxy_server.text().strip(),
-            "username": self.proxy_username.text(),
-            "password": self.proxy_password.text(),
-        }
+    def proxy_settings(self) -> list[dict[str, str]]:
+        return self.proxy_editor.settings()
 
-    def _browser_proxy(self) -> dict[str, str] | None:
-        return config.playwright_proxy(self.proxy_settings())
+    def browser_proxy_routes(self) -> WalkProxyRoutes:
+        return self._proxy_pool.routes_for_walk(self.proxy_settings())
 
-    def _apply_proxy_settings(self, settings: dict[str, str | bool]) -> None:
-        self.proxy_enabled.setChecked(bool(settings["enabled"]))
-        self.proxy_server.setText(str(settings["server"]))
-        self.proxy_username.setText(str(settings["username"]))
-        self.proxy_password.setText(str(settings["password"]))
+    def _apply_proxy_settings(self, settings: tuple[dict[str, str], ...]) -> None:
+        self.proxy_editor.apply_settings(settings)
 
     def email_settings(self) -> dict[str, str | int | bool]:
         return {
@@ -439,20 +431,26 @@ class MainWindow(QMainWindow):
         self._configure_email()
 
     @Slot(bool)
+    def _toggle_proxy_details(self, expanded: bool) -> None:
+        self.proxy_details.setVisible(expanded)
+        self.proxy_settings_button.setText("Свернуть параметры" if expanded else "Параметры прокси…")
+        self._refresh_settings_layout(self.proxy_section if expanded else None)
+
+    @Slot(bool)
     def _toggle_email_details(self, expanded: bool) -> None:
         self.email_details.setVisible(expanded)
+        self.email_settings_button.setText("Свернуть параметры" if expanded else "Параметры SMTP…")
+        self._refresh_settings_layout(self.email_section if expanded else None)
+
+    def _refresh_settings_layout(self, section_to_show: QWidget | None) -> None:
         self.settings_container.setMinimumHeight(0)
         self.settings_scroll.updateGeometry()
-        QTimer.singleShot(0, self._sync_settings_height)
+        QTimer.singleShot(0, self, lambda: self._sync_settings_height(section_to_show))
 
-    @Slot()
-    def _sync_settings_height(self) -> None:
+    def _sync_settings_height(self, section_to_show: QWidget | None) -> None:
         self._settings_layout.activate()
         self.settings_container.setMinimumHeight(self.settings_container.sizeHint().height())
-        if self.email_settings_button.isChecked():
-            self.settings_scroll.verticalScrollBar().setValue(self.email_section.y())
-        else:
-            self.settings_scroll.verticalScrollBar().setValue(0)
+        self.settings_scroll.verticalScrollBar().setValue(section_to_show.y() if section_to_show else 0)
 
     @Slot()
     def _configure_email(self) -> None:
@@ -551,11 +549,6 @@ class MainWindow(QMainWindow):
             self._emergency_stopped
             and not any(page.walk_pending or page.links_fetch_pending for page in getattr(self, "pages", {}).values())
         )
-
-    @Slot(bool)
-    def _toggle_proxy(self, enabled: bool) -> None:
-        for widget in (self.proxy_server, self.proxy_username, self.proxy_password):
-            widget.setEnabled(enabled)
 
     def _choose_save_config(self) -> None:
         path, _ = QFileDialog.getSaveFileName(

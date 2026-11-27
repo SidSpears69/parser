@@ -1,4 +1,4 @@
-"""Manual import/export of site settings with Windows user-bound secrets."""
+"""Import/export of site settings with Windows user-bound secrets."""
 
 from __future__ import annotations
 
@@ -15,7 +15,8 @@ import tempfile
 from urllib.parse import urlsplit
 
 
-VERSION = 1
+VERSION = 2
+PROXY_SLOTS = 3
 SITES = ("sail-master.ru", "fishingline.ru", "petrokanat.ru", "setepolotna.ru")
 BROWSERS = ("Яндекс Браузер", "Google Chrome", "Microsoft Edge", "Mozilla Firefox")
 INTERVAL_UNITS = ("hours", "days", "weeks", "months")
@@ -31,8 +32,16 @@ class ConfigError(ValueError):
 @dataclass(frozen=True, slots=True)
 class LoadedConfig:
     sites: dict[str, dict]
-    proxy: dict[str, str | bool]
+    proxy_pool: tuple[dict[str, str], ...]
     email: dict[str, str | int | bool]
+
+    @property
+    def proxy(self) -> dict[str, str | bool]:
+        """Expose the first active proxy to callers using the old single-proxy API."""
+        first = next((slot for slot in self.proxy_pool if slot["server"]), None)
+        return {"enabled": first is not None, **(first or {
+            "server": "", "username": "", "password": "",
+        })}
 
 
 def default_email() -> dict[str, str | int | bool]:
@@ -81,6 +90,12 @@ def default_proxy() -> dict[str, str | bool]:
     return {"enabled": False, "server": "", "username": "", "password": ""}
 
 
+def default_proxy_pool() -> tuple[dict[str, str], ...]:
+    return tuple(
+        {"server": "", "username": "", "password": ""} for _ in range(PROXY_SLOTS)
+    )
+
+
 def validate_proxy(value: object) -> dict[str, str | bool]:
     """Validate one app-wide browser proxy, without resolving its country."""
     fields = _require_fields(value, {"enabled", "server", "username", "password"}, "Прокси")
@@ -114,6 +129,36 @@ def validate_proxy(value: object) -> dict[str, str | bool]:
             if len(username.encode("utf-8")) > 255 or len(password.encode("utf-8")) > 255:
                 raise ConfigError("Прокси: логин и пароль SOCKS5 должны быть не длиннее 255 байт.")
     return {"enabled": enabled, "server": server, "username": username, "password": password}
+
+
+def validate_proxy_pool(value: object) -> tuple[dict[str, str], ...]:
+    """Validate three optional slots; credentials alone are an incomplete slot."""
+    if not isinstance(value, (list, tuple)) or len(value) > PROXY_SLOTS:
+        raise ConfigError(f"Прокси: допускается не более {PROXY_SLOTS} слотов.")
+    slots = []
+    for index, value_slot in enumerate(value, 1):
+        fields = _require_fields(
+            value_slot, {"server", "username", "password"}, f"Прокси №{index}",
+        )
+        server = _string(fields["server"], f"Прокси №{index}, адрес").strip()
+        username = _string(fields["username"], f"Прокси №{index}, логин")
+        password = _string(fields["password"], f"Прокси №{index}, пароль")
+        if server or username or password:
+            if not server:
+                raise ConfigError(f"Прокси №{index}: укажите адрес или очистите логин и пароль.")
+            try:
+                checked = validate_proxy({
+                    "enabled": True, "server": server,
+                    "username": username, "password": password,
+                })
+            except ConfigError as error:
+                raise ConfigError(
+                    f"Прокси №{index}: {str(error).removeprefix('Прокси: ')}"
+                ) from error
+            server = str(checked["server"])
+        slots.append({"server": server, "username": username, "password": password})
+    slots.extend(default_proxy_pool()[len(slots):])
+    return tuple(slots)
 
 
 def playwright_proxy(value: dict[str, str | bool]) -> dict[str, str] | None:
@@ -303,22 +348,31 @@ def _decrypt(value: object, location: str) -> str:
 
 
 def save(
-    path: str | Path, sites: dict[str, dict], proxy: dict[str, str | bool] | None = None,
+    path: str | Path, sites: dict[str, dict],
+    proxy: dict[str, str | bool] | list[dict[str, str]] | tuple[dict[str, str], ...] | None = None,
     email: dict[str, str | int | bool] | None = None,
 ) -> None:
-    """Atomically export all tabs and the optional shared proxy."""
+    """Atomically export all tabs and the shared proxy pool."""
     checked = _validate_sites(sites)
-    checked_proxy = validate_proxy(proxy) if proxy is not None else None
+    if isinstance(proxy, dict):
+        old_proxy = validate_proxy(proxy)
+        pool = list(default_proxy_pool())
+        if old_proxy["enabled"]:
+            pool[0] = {key: str(old_proxy[key]) for key in ("server", "username", "password")}
+        checked_pool = validate_proxy_pool(pool)
+    else:
+        checked_pool = validate_proxy_pool(proxy if proxy is not None else default_proxy_pool())
     checked_email = validate_email(email) if email is not None else None
     for settings in checked.values():
         settings["token"] = _encrypt(settings["token"])
         settings["ftp"]["password"] = _encrypt(settings["ftp"]["password"])
     try:
-        document: dict[str, object] = {"version": VERSION, "sites": checked}
-        if checked_proxy is not None:
-            document["proxy"] = {
-                **checked_proxy, "password": _encrypt(str(checked_proxy["password"])),
-            }
+        document: dict[str, object] = {
+            "version": VERSION, "sites": checked,
+            "proxies": [
+                {**slot, "password": _encrypt(slot["password"])} for slot in checked_pool
+            ],
+        }
         if checked_email is not None:
             document["email"] = {
                 **checked_email, "password": _encrypt(str(checked_email["password"])),
@@ -349,9 +403,16 @@ def load_document(path: str | Path) -> LoadedConfig:
         document = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
         raise ConfigError(f"Не удалось прочитать файл конфигурации: {error}") from error
-    document = _require_fields(document, {"version", "sites"}, "Конфигурация", optional=("proxy", "email"))
-    if type(document["version"]) is not int or document["version"] != VERSION:
+    document = _require_fields(
+        document, {"version", "sites"}, "Конфигурация", optional=("proxy", "proxies", "email"),
+    )
+    version = document["version"]
+    if type(version) is not int or version not in (1, VERSION):
         raise ConfigError("Неподдерживаемая версия файла конфигурации.")
+    if (version == 1 and "proxies" in document) or (
+        version == VERSION and ("proxy" in document or "proxies" not in document)
+    ):
+        raise ConfigError("Конфигурация: неверный набор полей прокси.")
     encrypted_sites = _require_fields(document["sites"], set(SITES), "Сайты")
     plain_sites = {}
     for site in SITES:
@@ -376,15 +437,29 @@ def load_document(path: str | Path) -> LoadedConfig:
                 "password": _decrypt(ftp["password"], f"Настройки {site}, пароль FTP"),
             },
         }
-    proxy = default_proxy()
-    if "proxy" in document:
+    pool = list(default_proxy_pool())
+    if version == 1 and "proxy" in document:
         encrypted_proxy = _require_fields(
             document["proxy"], {"enabled", "server", "username", "password"}, "Прокси",
         )
-        proxy = validate_proxy({
+        old_proxy = validate_proxy({
             **encrypted_proxy,
             "password": _decrypt(encrypted_proxy["password"], "Прокси, пароль"),
         })
+        if old_proxy["enabled"]:
+            pool[0] = {key: str(old_proxy[key]) for key in ("server", "username", "password")}
+    elif version == VERSION:
+        encrypted_pool = document["proxies"]
+        if not isinstance(encrypted_pool, list) or len(encrypted_pool) > PROXY_SLOTS:
+            raise ConfigError(f"Прокси: допускается не более {PROXY_SLOTS} слотов.")
+        for index, encrypted_slot in enumerate(encrypted_pool):
+            encrypted_slot = _require_fields(
+                encrypted_slot, {"server", "username", "password"}, f"Прокси №{index + 1}",
+            )
+            pool[index] = {
+                **encrypted_slot,
+                "password": _decrypt(encrypted_slot["password"], f"Прокси №{index + 1}, пароль"),
+            }
     email = default_email()
     if "email" in document:
         encrypted_email = _require_fields(
@@ -396,7 +471,7 @@ def load_document(path: str | Path) -> LoadedConfig:
             **encrypted_email,
             "password": _decrypt(encrypted_email["password"], "Почта, пароль"),
         })
-    return LoadedConfig(_validate_sites(plain_sites), proxy, email)
+    return LoadedConfig(_validate_sites(plain_sites), validate_proxy_pool(pool), email)
 
 
 def load(path: str | Path) -> dict[str, dict]:

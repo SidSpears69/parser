@@ -10,6 +10,10 @@ from playwright.sync_api import Error as PlaywrightError
 _NETWORK_CODE = re.compile(r"\b(?:E(?:CONN|HOST|NET|PIPE|TIMEDOUT|AI_|NOTFOUND)[A-Z_]*|ERR_[A-Z_]+)\b")
 
 
+def browser_context_is_closed(error: PlaywrightError) -> bool:
+    return "Target page, context or browser has been closed" in str(error)
+
+
 def request_failure_reason(error: PlaywrightError) -> str:
     """Keep the useful error class without copying URLs or proxy credentials to logs."""
     message = str(error)
@@ -17,7 +21,7 @@ def request_failure_reason(error: PlaywrightError) -> str:
         return "SOCKS5-прокси отклонил соединение"
     if "Invalid character in header content" in message:
         return "недопустимый символ в HTTP-заголовке"
-    if "Target page, context or browser has been closed" in message:
+    if browser_context_is_closed(error):
         return "браузер или контекст запроса закрыт"
     code = _NETWORK_CODE.search(message)
     if code is not None:

@@ -73,6 +73,35 @@ class ConfigTests(unittest.TestCase):
         })
 
     @unittest.skipUnless(os.name == "nt", "Windows DPAPI required")
+    def test_three_proxy_slots_round_trip_and_encrypt_all_passwords(self):
+        slots = list(config.default_proxy_pool())
+        slots[0] = {"server": "socks5://one.example:1080", "username": "one", "password": "first-secret"}
+        slots[2] = {"server": "http://three.example:8080", "username": "three", "password": "third-secret"}
+        config.save(self.path, sample_sites(), slots)
+        saved = self.path.read_text(encoding="utf-8")
+        self.assertNotIn("first-secret", saved)
+        self.assertNotIn("third-secret", saved)
+        self.assertEqual(config.load_document(self.path).proxy_pool, tuple(slots))
+
+    @unittest.skipUnless(os.name == "nt", "Windows DPAPI required")
+    def test_version_one_proxy_is_imported_into_first_slot(self):
+        legacy = {
+            "enabled": True, "server": "socks5://old.example:1080",
+            "username": "old-user", "password": "old-secret",
+        }
+        config.save(self.path, sample_sites(), legacy)
+        document = json.loads(self.path.read_text(encoding="utf-8"))
+        first = document.pop("proxies")[0]
+        document["version"] = 1
+        document["proxy"] = {"enabled": True, **first}
+        self.path.write_text(json.dumps(document), encoding="utf-8")
+        loaded = config.load_document(self.path)
+        self.assertEqual(loaded.proxy_pool[0], {
+            "server": legacy["server"], "username": legacy["username"], "password": legacy["password"],
+        })
+        self.assertEqual(loaded.proxy_pool[1:], config.default_proxy_pool()[1:])
+
+    @unittest.skipUnless(os.name == "nt", "Windows DPAPI required")
     def test_old_config_defaults_to_no_proxy(self):
         config.save(self.path, sample_sites())
         loaded = config.load_document(self.path)

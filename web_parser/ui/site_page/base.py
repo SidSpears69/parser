@@ -14,6 +14,7 @@ from web_parser.browser_discovery import BrowserInstallation
 from web_parser.images import SavedImage
 from web_parser.ozon import OzonProduct
 from web_parser.product_links import ProductLinks
+from web_parser.proxy_pool import WalkProxyRoutes
 from web_parser.ui.links import LinksPreviewTable
 from web_parser.ui.log import ErrorLog
 from web_parser.ui.ozon import OzonResultsTable
@@ -65,8 +66,8 @@ class SitePageBase(QWidget):
 
     def __init__(
             self, site: str, parent: QWidget | None = None,
-            *, proxy_provider: Callable[[], dict[str, str] | None] = lambda: None,
-            proxy_secrets: Callable[[], tuple[str, str]] = lambda: ("", ""),
+            *, proxy_provider: Callable[[], WalkProxyRoutes | None] = lambda: None,
+            proxy_secrets: Callable[[], tuple[str, ...]] = lambda: (),
             extra_secrets: Callable[[], tuple[str, ...]] = lambda: (),
             log_root: Path | None = None,
     ):

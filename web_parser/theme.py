@@ -30,6 +30,7 @@ QScrollArea { border: none; }
 QScrollArea#settingsScroll, QScrollArea#settingsScroll > QWidget,
 QScrollArea#settingsScroll > QWidget > QWidget { background: #f3f5f9; }
 QFrame#section { background: white; border: 1px solid #e0e6ef; border-radius: 8px; }
+QFrame#proxySlot { background: #f8fafc; border: 1px solid #dce3ed; border-radius: 7px; }
 QLineEdit, QSpinBox, QTimeEdit, QComboBox {
     background: #fbfcfe; border: 1px solid #cdd7e4; border-radius: 5px;
     min-height: 22px; padding: 5px 8px; selection-background-color: #245fd2;

@@ -34,7 +34,7 @@ class RecordingAccess:
         pass
 
     @classmethod
-    def fetch(cls, url):
+    def fetch(cls, url, **_kwargs):
         cls.visited.append(url)
         return PageSnapshot(url, url, 200, "<html>Товар</html>", 1)
 
@@ -147,7 +147,7 @@ class SchedulerTests(UiTestCase):
 
         class BlockingAccess(RecordingAccess):
             @classmethod
-            def fetch(cls, url):
+            def fetch(cls, url, **_kwargs):
                 started.set()
                 release.wait(3)
                 return super().fetch(url)

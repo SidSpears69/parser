@@ -40,14 +40,16 @@ class LogTests(UiTestCase):
         page = self.window.pages[SITES[0]]
         page.token.setText("private token")
         page.ftp_password.setText("ftp-password")
-        self.window.proxy_password.setText("proxy-password")
+        self.window.proxy_editor.slots[0][2].setText("proxy-password")
+        self.window.proxy_editor.slots[2][2].setText("third-proxy-password")
         page.log.append_error(
             "5", "https://example.org/?token=private%20token",
-            "FTP ftp-password; proxy proxy-password; token private token",
+            "FTP ftp-password; proxy proxy-password; third-proxy-password; token private token",
         )
         content = page.log.file.path.read_text(encoding="utf-8")
         self.assertEqual(page.log.editor.toPlainText() + "\n", content)
-        for secret in ("private token", "private%20token", "ftp-password", "proxy-password"):
+        for secret in ("private token", "private%20token", "ftp-password", "proxy-password",
+                       "third-proxy-password"):
             self.assertNotIn(secret, content)
         self.assertIn("[скрыто]", content)
 

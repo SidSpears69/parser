@@ -95,14 +95,14 @@ class SiteWalkPage(SiteLinksPage):
         ):
             return
         try:
-            proxy = self._proxy_provider()
+            proxy_routes = self._proxy_provider()
         except config.ConfigError as error:
             self.state_label.setText("Ошибка прокси")
             self.run_status.setText(str(error))
             return
         thread = BrowserWalkThread(
             self.site, installation, self._product_links, self.pause.value(), self,
-            proxy=proxy, ftp_settings=self.settings()["ftp"],
+            proxy_routes=proxy_routes, ftp_settings=self.settings()["ftp"],
         )
         self._walk_thread = thread
         self._clear_ozon_results()
@@ -124,9 +124,7 @@ class SiteWalkPage(SiteLinksPage):
         thread.wildberries_parsed.connect(self._walk_wildberries_parsed)
         thread.yandex_parsed.connect(self._walk_yandex_parsed)
         thread.image_failed.connect(self._walk_image_failed)
-        thread.ozon_recovery_started.connect(self._walk_ozon_recovery_started)
-        thread.ozon_direct_started.connect(self._walk_ozon_direct_started)
-        thread.yandex_direct_started.connect(self._walk_yandex_direct_started)
+        thread.route_changed.connect(self._walk_route_changed)
         thread.ftp_upload_started.connect(self._walk_ftp_upload_started)
         thread.browser_notice.connect(self._walk_browser_notice)
         thread.finished.connect(self._walk_finished)
@@ -182,27 +180,13 @@ class SiteWalkPage(SiteLinksPage):
         if not self._shutting_down:
             self.log.append_error("", "", f"Браузер: {message}")
 
-    @Slot(str)
-    def _walk_ozon_recovery_started(self, product_id: str) -> None:
+    @Slot(str, str, int)
+    def _walk_route_changed(self, product_id: str, marketplace: str, route: int) -> None:
         if not self._shutting_down:
+            connection = f"прокси №{route}" if route else "прямое подключение"
             self.run_status.setText(
-                f"Ozon показал капчу для товара {product_id}; повторная попытка в новом профиле браузера…"
-            )
-
-    @Slot(str)
-    def _walk_ozon_direct_started(self, product_id: str) -> None:
-        if not self._shutting_down:
-            self.run_status.setText(
-                f"Ozon показал капчу для товара {product_id} и в новом профиле; "
-                "повторная попытка без прокси…"
-            )
-
-    @Slot(str)
-    def _walk_yandex_direct_started(self, product_id: str) -> None:
-        if not self._shutting_down:
-            self.run_status.setText(
-                f"Яндекс Маркет не открылся через прокси для товара {product_id}; "
-                "повторная попытка без прокси…"
+                f"{marketplace}, товар {product_id}: маршрут недоступен или ограничен. "
+                f"Следующая попытка — {connection}."
             )
 
     @Slot()
@@ -301,6 +285,11 @@ class SiteWalkPage(SiteLinksPage):
                 self.ftp_status.setText("Выгрузка не выполнена: аварийная остановка.")
             elif thread.cancelled:
                 self.ftp_status.setText("Выгрузка не завершена: обход остановлен.")
+            elif thread.ftp_skip_reason or (thread.error and thread.ftp_configured):
+                reason = thread.ftp_skip_reason or "Не удалось выполнить обход."
+                message = f"Выгрузка пропущена. {reason} Предыдущие данные на сервере сохранены."
+                self.ftp_status.setText(message)
+                self.log.append_error("", "", f"FTP: {message}")
             else:
                 self.ftp_status.setText("FTP не настроен; данные остались локально.")
             if self._emergency_stopped:
@@ -324,7 +313,9 @@ class SiteWalkPage(SiteLinksPage):
                         f" FTP: {thread.ftp_result.uploaded_images} фото и JSON выгружены."
                         if thread.ftp_result is not None else
                         " FTP: ошибка выгрузки."
-                        if thread.ftp_error is not None else ""
+                        if thread.ftp_error is not None else
+                        " FTP: выгрузка пропущена."
+                        if thread.ftp_skip_reason is not None else ""
                     )
                 )
             self._update_links_controls()

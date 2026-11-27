@@ -16,7 +16,7 @@ from urllib.parse import quote, urlsplit
 from playwright.sync_api import APIRequestContext, Error as PlaywrightError
 
 from web_parser.config import SITES
-from web_parser.network_errors import request_failure_reason
+from web_parser.network_errors import browser_context_is_closed, request_failure_reason
 from web_parser.paths import ARTIFACT_ROOT
 
 
@@ -43,6 +43,10 @@ class ImageDownloadError(RuntimeError):
 
 class ImageDownloadCancelled(ImageDownloadError):
     """The user stopped the browser walk during photo processing."""
+
+
+class ImageRequestContextClosed(ImageDownloadError):
+    """The browser request context closed during photo processing."""
 
 
 class _ImageRequestFailed(ImageDownloadError):
@@ -196,6 +200,9 @@ class ImageStore:
                         raise ImageDownloadError("Фото превышает допустимый размер 30 МБ.")
                     return payload, _image_extension(payload)
             except PlaywrightError as error:
+                if browser_context_is_closed(error):
+                    self._check_cancelled()
+                    raise ImageRequestContextClosed("Браузер или его контекст закрыт при загрузке фото.") from error
                 last_problem = f"Не удалось загрузить фото по сети: {request_failure_reason(error)}."
             finally:
                 if response is not None:
@@ -246,9 +253,9 @@ class ImageStore:
                 path = folder / f"{position}{extension}"
                 self._check_cancelled()
                 self._save(path, payload)
+            except (ImageDownloadCancelled, ImageRequestContextClosed):
+                raise
             except ImageDownloadError as error:
-                if isinstance(error, ImageDownloadCancelled):
-                    raise
                 failed.append(ImageFailure(position, product.image_url, str(error)))
             else:
                 saved.append(SavedImage(

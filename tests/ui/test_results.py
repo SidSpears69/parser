@@ -32,7 +32,7 @@ class ResultsTests(UiTestCase):
                 pass
 
             @staticmethod
-            def fetch(url):
+            def fetch(url, **_kwargs):
                 status = 403 if url == links[0].ozon_url else 200
                 return PageSnapshot(url, url, status, "<html>Товар</html>", 1)
 
@@ -124,7 +124,7 @@ class ResultsTests(UiTestCase):
                 pass
 
             @staticmethod
-            def fetch(url):
+            def fetch(url, **_kwargs):
                 visited.append(url)
                 return PageSnapshot(url, url, 200, "<html>Товар</html>", 1)
 

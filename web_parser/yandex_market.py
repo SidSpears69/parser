@@ -209,6 +209,7 @@ def parse_yandex_search(
             page.wait_for_selector(", ".join(_CARD_SELECTORS), timeout=8_000)
         except PlaywrightTimeoutError:
             pass
+        access.check_yandex_captcha()
         raw_cards = page.evaluate(_EXTRACT_CARDS, _CARD_SELECTORS)
         if not raw_cards:
             if page.evaluate(_EMPTY_CHECK):

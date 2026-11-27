@@ -2,9 +2,8 @@
 
 from decimal import Decimal
 import json
-from types import SimpleNamespace
-from typing import cast
 import unittest
+from unittest.mock import Mock
 
 from playwright.sync_api import sync_playwright
 
@@ -19,7 +18,7 @@ class LayoutFallbackTests(unittest.TestCase):
             browser = playwright.firefox.launch(headless=True)
             try:
                 page = browser.new_page()
-                access = cast(BrowserPageAccess, SimpleNamespace(page=page))
+                access = Mock(spec=BrowserPageAccess, page=page)
                 markup = """
                     <article data-zone-name="productSnippet" data-zone-data='CARD_DATA'>
                         <a href="/product--shnur/123">
@@ -69,7 +68,7 @@ class LayoutFallbackTests(unittest.TestCase):
                 """
                 page.set_content(alternate_card * 6)
                 notices: list[str] = []
-                access = cast(BrowserPageAccess, SimpleNamespace(page=page))
+                access = Mock(spec=BrowserPageAccess, page=page)
                 ozon = parse_ozon_search(access, on_layout_change=notices.append)
                 self.assertEqual(ozon[0].name, "Парусный шнур")
                 self.assertEqual(ozon[0].price, Decimal("1234"))

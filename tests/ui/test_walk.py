@@ -10,7 +10,7 @@ from PySide6.QtWidgets import QScrollArea
 
 from web_parser.browser_access import (
     BrowserAccessCancelled, BrowserAccessDenied, BrowserAccessError,
-    PageSnapshot, browser_profile_dir,
+    PageSnapshot, YandexCaptchaDenied, browser_profile_dir,
 )
 from web_parser.browser_discovery import BrowserInstallation
 from web_parser.product_links import ProductLinks
@@ -20,8 +20,8 @@ from .base import UiTestCase, sample_wildberries_product
 
 
 class WalkTests(UiTestCase):
-    def _assert_denied_marketplace_links_are_tried_individually(
-        self, url_field: str, denial: BrowserAccessDenied,
+    def _assert_marketplace_denial_logged(
+        self, url_field: str, denial: BrowserAccessDenied, *, continue_marketplace: bool = False,
     ) -> None:
         page = self.window.pages[SITES[0]]
         links = [ProductLinks(
@@ -29,7 +29,7 @@ class WalkTests(UiTestCase):
             f"https://market.yandex.ru/search?text={index}",
         ) for index in (1, 2)]
         self._load_links(page, links)
-        denied_urls = {getattr(product, url_field) for product in links}
+        denied_url = getattr(links[0], url_field)
         visited = []
 
         class DeniedAccess:
@@ -43,16 +43,16 @@ class WalkTests(UiTestCase):
                 pass
 
             @staticmethod
-            def fetch(url):
+            def fetch(url, **_kwargs):
                 visited.append(url)
-                if url in denied_urls:
+                if url == denied_url:
                     raise denial
                 return PageSnapshot(url, url, 200, "<html>Товар</html>", 1)
 
             @staticmethod
             def fetch_wildberries_json(url):
                 visited.append(url)
-                if url in denied_urls:
+                if url == denied_url:
                     raise denial
                 return {"products": [{"id": 519585970}]}
 
@@ -67,9 +67,9 @@ class WalkTests(UiTestCase):
                 pass
 
             @staticmethod
-            def fetch(url):
+            def fetch(url, **_kwargs):
                 visited.append(url)
-                if url in denied_urls:
+                if url == denied_url:
                     raise denial
                 return (sample_wildberries_product(),)
 
@@ -83,27 +83,29 @@ class WalkTests(UiTestCase):
         ):
             page.start_button.click()
             self._wait_for_walk(page)
-        expected_visits = [
-            links[0].ozon_url, links[0].wildberries_url, links[0].yandex_market_url,
-            links[1].ozon_url, links[1].wildberries_url, links[1].yandex_market_url,
-        ]
-        if url_field == "ozon_url" and denial.status == 403:
-            expected_visits.insert(1, links[0].ozon_url)
-        self.assertEqual(visited, expected_visits)
-        self.assertIn("Загружено: 4; ошибок: 2", page.run_status.text())
-        self.assertEqual(page.log.editor.document().blockCount(), 2)
+        self.assertEqual(visited, [
+            url for product in links for url in (
+                product.ozon_url, product.wildberries_url, product.yandex_market_url,
+            ) if continue_marketplace or url != getattr(links[1], url_field)
+        ])
         log = page.log.editor.toPlainText()
-        self.assertEqual(log.count(str(denial)), 2)
-        for product in links:
-            self.assertIn(getattr(product, url_field), log)
-        self.assertNotIn("пропущены", log)
+        errors = 1 if continue_marketplace else 2
+        self.assertIn(f"Загружено: {6 - errors}; ошибок: {errors}", page.run_status.text())
+        self.assertEqual(page.log.editor.document().blockCount(), errors)
+        self.assertEqual(log.count(str(denial)), errors)
+        self.assertIn(denied_url, log)
+        if continue_marketplace:
+            self.assertIn("ID: 1", log)
+            self.assertNotIn(getattr(links[1], url_field), log)
+        else:
+            self.assertIn(getattr(links[1], url_field), log)
 
     def test_start_visits_all_urls_in_json_order_and_logs_page_error(self):
         page = self.window.pages[SITES[0]]
-        self.window.proxy_enabled.setChecked(True)
-        self.window.proxy_server.setText("http://ru-proxy.example:8080")
-        self.window.proxy_username.setText("proxy-user")
-        self.window.proxy_password.setText("proxy-secret")
+        server, username, password = self.window.proxy_editor.slots[0]
+        server.setText("http://ru-proxy.example:8080")
+        username.setText("proxy-user")
+        password.setText("proxy-secret")
         chrome = BrowserInstallation("Google Chrome", Path("C:/Browsers/Chrome/chrome.exe"))
         page.set_available_browsers({chrome.name: chrome})
         page.browser.setCurrentIndex(page.browser.findData(chrome.name))
@@ -129,7 +131,7 @@ class WalkTests(UiTestCase):
                 pass
 
             @staticmethod
-            def fetch(url):
+            def fetch(url, **_kwargs):
                 visited.append(url)
                 return PageSnapshot(url, url, 200, "<html>Товар</html>", 1)
 
@@ -174,7 +176,8 @@ class WalkTests(UiTestCase):
             "server": "http://ru-proxy.example:8080",
             "username": "proxy-user", "password": "proxy-secret",
         })
-        self.assertEqual(created[0][2]["profile_dir"], browser_profile_dir(page.site, chrome.name))
+        profile = browser_profile_dir(page.site, chrome.name)
+        self.assertEqual(created[0][2]["profile_dir"], profile.with_name(f"{profile.name}-proxy-1"))
         self.assertEqual(visited, [
             links[0].ozon_url, links[0].wildberries_url, links[0].yandex_market_url,
             links[1].ozon_url, links[1].wildberries_url, links[1].yandex_market_url,
@@ -222,7 +225,7 @@ class WalkTests(UiTestCase):
                 pass
 
             @staticmethod
-            def fetch(url):
+            def fetch(url, **_kwargs):
                 if url == long_url:
                     entered.set()
                     release.wait(3)
@@ -252,20 +255,21 @@ class WalkTests(UiTestCase):
             release.set()
             self._wait_for_walk(page)
 
-    def test_ozon_denial_is_logged_for_each_link_without_skipping(self):
-        self._assert_denied_marketplace_links_are_tried_individually(
+    def test_ozon_denial_stops_requests_to_that_marketplace(self):
+        self._assert_marketplace_denial_logged(
             "ozon_url", BrowserAccessDenied(403),
         )
 
-    def test_wildberries_denial_is_logged_for_each_link_without_skipping(self):
-        self._assert_denied_marketplace_links_are_tried_individually(
+    def test_wildberries_denial_stops_requests_to_that_marketplace(self):
+        self._assert_marketplace_denial_logged(
             "wildberries_url", BrowserAccessDenied(498),
         )
 
-    def test_yandex_captcha_is_logged_for_each_link_without_skipping(self):
-        self._assert_denied_marketplace_links_are_tried_individually(
+    def test_yandex_captcha_is_logged_once_and_next_url_is_opened(self):
+        self._assert_marketplace_denial_logged(
             "yandex_market_url",
-            BrowserAccessDenied(200, "обнаружена капча Яндекс Маркета; страница недоступна."),
+            YandexCaptchaDenied(200, "обнаружена капча Яндекс Маркета; страница недоступна."),
+            continue_marketplace=True,
         )
 
     def test_firefox_start_uses_playwright_build_without_stock_installation(self):
@@ -288,7 +292,7 @@ class WalkTests(UiTestCase):
                 pass
 
             @staticmethod
-            def fetch(url):
+            def fetch(url, **_kwargs):
                 return PageSnapshot(url, url, 200, "<html>Товар</html>", 1)
 
             @staticmethod
@@ -343,7 +347,7 @@ class WalkTests(UiTestCase):
                 pass
 
             @staticmethod
-            def fetch(_url):
+            def fetch(_url, **_kwargs):
                 raise BrowserAccessError("Тестовая ошибка страницы")
 
             @staticmethod
@@ -375,7 +379,7 @@ class WalkTests(UiTestCase):
             def __exit__(self, *_args):
                 closed.append(True)
 
-            def fetch(self, url):
+            def fetch(self, url, **_kwargs):
                 visited.append(url)
                 entered.set()
                 release.wait(3)
@@ -412,7 +416,7 @@ class WalkTests(UiTestCase):
             def __exit__(self, *_args):
                 closed.append(True)
 
-            def fetch(self, url):
+            def fetch(self, url, **_kwargs):
                 entered.set()
                 release.wait(3)
                 if self.cancel_requested():

@@ -5,9 +5,10 @@ from typing import Callable
 from PySide6.QtCore import QEvent, QObject, QPointF, Qt
 from PySide6.QtGui import QColor, QPaintEvent, QPainter, QPen
 from PySide6.QtWidgets import (
-    QComboBox, QFormLayout, QFrame, QLabel, QLineEdit, QSpinBox, QTimeEdit,
+    QComboBox, QFormLayout, QFrame, QHBoxLayout, QLabel, QLineEdit, QSpinBox, QTimeEdit,
     QVBoxLayout, QWidget,
 )
+
 
 def label(text: str, name: str = "") -> QLabel:
     widget = QLabel(text)
@@ -25,13 +26,21 @@ def field(placeholder: str, name: str, secret: bool = False) -> QLineEdit:
     return widget
 
 
-def section(title: str) -> tuple[QFrame, QVBoxLayout]:
+def section(title: str, *, header_action: QWidget | None = None) -> tuple[QFrame, QVBoxLayout]:
     frame = QFrame()
     frame.setObjectName("section")
     layout = QVBoxLayout(frame)
     layout.setContentsMargins(16, 13, 16, 15)
     layout.setSpacing(10)
-    layout.addWidget(label(title, "sectionTitle"))
+    heading = label(title, "sectionTitle")
+    if header_action is None:
+        layout.addWidget(heading)
+    else:
+        header = QHBoxLayout()
+        header.addWidget(heading)
+        header.addStretch()
+        header.addWidget(header_action)
+        layout.addLayout(header)
     return frame, layout
 
 
@@ -43,11 +52,11 @@ def form() -> QFormLayout:
 
 
 def _paint_arrow_control(
-    widget: QWidget,
-    event: QPaintEvent,
-    native_paint: Callable[[QPaintEvent], None],
-    *,
-    spin: bool,
+        widget: QWidget,
+        event: QPaintEvent,
+        native_paint: Callable[[QPaintEvent], None],
+        *,
+        spin: bool,
 ) -> None:
     """Paint the native control and add a visible chevron on top."""
     native_paint(event)
@@ -58,8 +67,10 @@ def _paint_arrow_control(
     x = widget.width() - (12 if spin else 14)
     middle = widget.height() / 2
     if spin:
-        painter.drawPolyline((QPointF(x - 4, middle / 2 + 2), QPointF(x, middle / 2 - 2), QPointF(x + 4, middle / 2 + 2)))
-        painter.drawPolyline((QPointF(x - 4, middle + middle / 2 - 2), QPointF(x, middle + middle / 2 + 2), QPointF(x + 4, middle + middle / 2 - 2)))
+        painter.drawPolyline(
+            (QPointF(x - 4, middle / 2 + 2), QPointF(x, middle / 2 - 2), QPointF(x + 4, middle / 2 + 2)))
+        painter.drawPolyline((QPointF(x - 4, middle + middle / 2 - 2), QPointF(x, middle + middle / 2 + 2),
+                              QPointF(x + 4, middle + middle / 2 - 2)))
     else:
         painter.drawPolyline((QPointF(x - 4, middle - 2), QPointF(x, middle + 2), QPointF(x + 4, middle - 2)))
 

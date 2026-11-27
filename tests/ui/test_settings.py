@@ -8,6 +8,7 @@ from PySide6.QtCore import QPoint, Qt, QTime
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QLineEdit, QScrollArea
 
+from web_parser import config
 from web_parser.browser_discovery import BrowserInstallation
 from web_parser.product_links import ProductLinks
 from web_parser.ui import SITES
@@ -125,10 +126,14 @@ class SettingsTests(UiTestCase):
     def test_configuration_round_trip_restores_each_tab(self):
         first = self.window.pages[SITES[0]]
         second = self.window.pages[SITES[1]]
-        self.window.proxy_enabled.setChecked(True)
-        self.window.proxy_server.setText("http://ru-proxy.example:8080")
-        self.window.proxy_username.setText("proxy-user")
-        self.window.proxy_password.setText("proxy-secret")
+        proxy_server, proxy_username, proxy_password = self.window.proxy_editor.slots[0]
+        proxy_server.setText("http://ru-proxy.example:8080")
+        proxy_username.setText("proxy-user")
+        proxy_password.setText("proxy-secret")
+        third_server, third_username, third_password = self.window.proxy_editor.slots[2]
+        third_server.setText("socks5://third.example:1080")
+        third_username.setText("third-user")
+        third_password.setText("third-secret")
         first.source_url.setText("https://first.example/products.json")
         first.token.setText("secret-token")
         first.source_schedule_enabled.setChecked(True)
@@ -157,10 +162,13 @@ class SettingsTests(UiTestCase):
             self.assertNotIn("secret-token", raw)
             self.assertNotIn("secret-password", raw)
             self.assertNotIn("proxy-secret", raw)
-            self.window.proxy_enabled.setChecked(False)
-            self.window.proxy_server.clear()
-            self.window.proxy_username.clear()
-            self.window.proxy_password.clear()
+            self.assertNotIn("third-secret", raw)
+            proxy_server.clear()
+            proxy_username.clear()
+            proxy_password.clear()
+            third_server.clear()
+            third_username.clear()
+            third_password.clear()
             for page in self.window.pages.values():
                 page.source_url.clear()
                 page.token.clear()
@@ -183,10 +191,10 @@ class SettingsTests(UiTestCase):
         page.source_schedule_enabled.setChecked(True)
         page.source_schedule_time.setTime(QTime(7, 15))
         page.ftp_password.setText("ftp-secret")
-        self.window.proxy_enabled.setChecked(True)
-        self.window.proxy_server.setText("socks5://proxy.example:63397")
-        self.window.proxy_username.setText("proxy-user")
-        self.window.proxy_password.setText("proxy-secret")
+        proxy_server, proxy_username, proxy_password = self.window.proxy_editor.slots[0]
+        proxy_server.setText("socks5://proxy.example:63397")
+        proxy_username.setText("proxy-user")
+        proxy_password.setText("proxy-secret")
 
         settings_path = Path(self._log_directory.name) / "settings.json"
         QTest.qWait(800)
@@ -235,12 +243,34 @@ class SettingsTests(UiTestCase):
         finally:
             reopened.close()
 
-    def test_proxy_fields_are_shared_and_disabled_until_enabled(self):
-        self.assertFalse(self.window.proxy_enabled.isChecked())
-        self.assertFalse(self.window.proxy_server.isEnabled())
-        self.window.proxy_enabled.setChecked(True)
-        self.assertTrue(self.window.proxy_server.isEnabled())
-        self.assertEqual(self.window.proxy_password.echoMode(), QLineEdit.EchoMode.Password)
+    def test_smtp_button_changes_label_when_settings_are_toggled(self):
+        button = self.window.email_settings_button
+        details = self.window.email_details
+        self.assertEqual(button.text(), "Параметры SMTP…")
+        self.assertTrue(details.isHidden())
+
+        button.click()
+        self.assertEqual(button.text(), "Свернуть параметры")
+        self.assertFalse(details.isHidden())
+
+        button.click()
+        self.assertEqual(button.text(), "Параметры SMTP…")
+        self.assertTrue(details.isHidden())
+
+    def test_proxy_fields_are_shared_and_empty_slots_do_not_activate(self):
+        self.assertEqual(len(self.window.proxy_editor.slots), 3)
+        self.assertEqual(self.window.proxy_settings(), list(config.default_proxy_pool()))
+        for _, _, password in self.window.proxy_editor.slots:
+            self.assertEqual(password.echoMode(), QLineEdit.EchoMode.Password)
+        self.assertEqual(self.window.browser_proxy_routes().candidates["Ozon"], (0,))
+        self.window.proxy_editor.slots[0][0].setText("http://first.example:8080")
+        self.window.proxy_editor.slots[2][0].setText("socks5://third.example:1080")
+        walk_routes = self.window.browser_proxy_routes()
+        self.assertEqual(walk_routes.candidates["Ozon"], (1, 3, 0))
+        walk_routes.remember("Ozon", 3)
+        next_walk = self.window.browser_proxy_routes()
+        self.assertEqual(next_walk.candidates["Ozon"], (3, 1, 0))
+        self.assertEqual(next_walk.candidates["Wildberries"], (1, 3, 0))
 
     def test_invalid_proxy_prevents_browser_walk(self):
         page = self.window.pages[SITES[0]]
@@ -251,8 +281,7 @@ class SettingsTests(UiTestCase):
             "42", "https://ozon.example/42", "https://wildberries.example/42",
             "https://market.example/42",
         )])
-        self.window.proxy_enabled.setChecked(True)
-        self.window.proxy_server.setText("invalid-proxy")
+        self.window.proxy_editor.slots[0][0].setText("invalid-proxy")
         page.start_button.click()
         self.assertFalse(page.walk_pending)
         self.assertEqual(page.state_label.text(), "Ошибка прокси")
