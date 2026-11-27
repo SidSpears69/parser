@@ -89,16 +89,13 @@ class WalkTests(UiTestCase):
             ) if continue_marketplace or url != getattr(links[1], url_field)
         ])
         log = page.log.editor.toPlainText()
-        errors = 1 if continue_marketplace else 2
-        self.assertIn(f"Загружено: {6 - errors}; ошибок: {errors}", page.run_status.text())
-        self.assertEqual(page.log.editor.document().blockCount(), errors)
-        self.assertEqual(log.count(str(denial)), errors)
+        skipped = 0 if continue_marketplace else 1
+        self.assertIn(f"Загружено: {5 - skipped}; ошибок: 1; пропущено: {skipped}", page.run_status.text())
+        self.assertEqual(page.log.editor.document().blockCount(), 1)
+        self.assertEqual(log.count(str(denial)), 1)
         self.assertIn(denied_url, log)
-        if continue_marketplace:
-            self.assertIn("ID: 1", log)
-            self.assertNotIn(getattr(links[1], url_field), log)
-        else:
-            self.assertIn(getattr(links[1], url_field), log)
+        self.assertIn("ID: 1", log)
+        self.assertNotIn(getattr(links[1], url_field), log)
 
     def test_start_visits_all_urls_in_json_order_and_logs_page_error(self):
         page = self.window.pages[SITES[0]]

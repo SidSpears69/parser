@@ -303,7 +303,7 @@ class SiteWalkPage(SiteLinksPage):
                 self.state_label.setText("Остановлен" if thread.cancelled else "Завершён")
                 ending = "Остановлено" if thread.cancelled else "Обход завершён"
                 self.run_status.setText(
-                    f"{ending}. Загружено: {thread.loaded}; ошибок: {thread.failed}; "
+                    f"{ending}. Загружено: {thread.loaded}; ошибок: {thread.failed}; пропущено: {thread.skipped}; "
                     f"товаров Ozon: {sum(len(items) for items in self._ozon_results.values())}; "
                     f"товаров Wildberries: {sum(len(items) for items in self._wildberries_results.values())}; "
                     f"товаров Яндекс Маркета: {sum(len(items) for items in self._yandex_results.values())}; "

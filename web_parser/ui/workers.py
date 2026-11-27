@@ -64,6 +64,7 @@ class BrowserWalkThread(QThread):
         self.ftp_settings = ftp_settings.copy() if ftp_settings is not None else None
         self.loaded = 0
         self.failed = 0
+        self.skipped = 0
         self.cancelled = False
         self.error: str | None = None
         self.fatal_layout: str | None = None
@@ -127,7 +128,7 @@ class BrowserWalkThread(QThread):
                     marketplace: candidates[0]
                     for marketplace, candidates in self.proxy_routes.candidates.items()
                 }
-                stopped_marketplaces: dict[str, BrowserAccessDenied] = {}
+                stopped_marketplaces: set[str] = set()
 
                 def open_browser(route: int) -> BrowserPageAccess:
                     if route not in browsers:
@@ -187,6 +188,9 @@ class BrowserWalkThread(QThread):
                             self.cancelled = True
                             return
                         index += 1
+                        if marketplace in stopped_marketplaces:
+                            self.skipped += 1
+                            continue
                         layout_context = (product.product_id, marketplace, url)
                         self.page_started.emit(product.product_id, marketplace, url, index, total)
                         preferred = preferred_routes[marketplace]
@@ -199,8 +203,6 @@ class BrowserWalkThread(QThread):
                         candidates = deque(ordered_routes)
                         attempted_routes: list[int] = []
                         try:
-                            if marketplace in stopped_marketplaces:
-                                raise stopped_marketplaces[marketplace]
                             route_error: BrowserAccessError | None = None
                             while candidates:
                                 route = candidates[0]
@@ -253,7 +255,7 @@ class BrowserWalkThread(QThread):
                                             self.route_changed.emit(product.product_id, marketplace, candidates[0])
                                         continue
                                     if error.status in (401, 403, 498) or isinstance(error, BrowserLoginRequired):
-                                        stopped_marketplaces[marketplace] = error
+                                        stopped_marketplaces.add(marketplace)
                                     raise
                                 break
                             else:
