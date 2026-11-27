@@ -66,17 +66,18 @@ class BrowserNavigationTests(BrowserAccessTestCase):
     def test_proxy_connection_failure_is_distinct_in_html_and_json_navigation(self):
         proxy = {"server": "http://proxy.example:8080"}
         for code, method, url in (
-            ("net::ERR_PROXY_CONNECTION_FAILED", "fetch", OZON_URL),
+            ("Page.goto: net::ERR_PROXY_CONNECTION_FAILED", "fetch", OZON_URL),
+            (": net::ERR_PROXY_CONNECTION_FAILED", "fetch", OZON_URL),
             ("NS_ERROR_PROXY_CONNECTION_REFUSED", "fetch_wildberries_json", WILDBERRIES_URL),
         ):
             with self.subTest(code=code, method=method):
                 self.page.goto.reset_mock(side_effect=True)
-                self.page.goto.side_effect = PlaywrightError(f"Page.goto: {code} at {url}")
+                self.page.goto.side_effect = PlaywrightError(f"{code} at {url}")
                 with self.access(proxy=proxy, strict_access=True) as access:
                     with self.assertRaises(BrowserProxyConnectionFailed):
                         getattr(access, method)(url)
                 self.page.goto.assert_called_once()
-        self.assertEqual(self.page.remove_listener.call_count, 2)
+        self.assertEqual(self.page.remove_listener.call_count, 3)
 
     def test_ozon_navigation_failure_reports_document_status(self):
         def navigate(*_args, **_kwargs):
@@ -148,6 +149,17 @@ class BrowserNavigationTests(BrowserAccessTestCase):
                 access.fetch(OZON_URL)
         self.assertIs(type(caught.exception), BrowserFetchFailed)
         self.assertEqual(self.page.goto.call_count, 3)
+
+    def test_socks5_error_without_api_name_checks_upstream_greeting(self):
+        self.page.goto.side_effect = PlaywrightError(f": net::ERR_SOCKS_CONNECTION_FAILED at {URL}")
+        with (
+            patch("web_parser.browser_access.navigation.responds_to_socks5_greeting", return_value=False) as probe,
+            self.access(proxy={"server": "socks5://proxy.example:1080"}, strict_access=True) as access,
+        ):
+            with self.assertRaises(BrowserProxyConnectionFailed):
+                access.fetch(URL)
+        probe.assert_called_once_with(("proxy.example", 1080), authenticated=False, timeout=2)
+        self.page.goto.assert_called_once()
 
     def test_socks5_connection_error_checks_for_upstream_greeting(self):
         self.page.goto.side_effect = PlaywrightError(

@@ -18,10 +18,14 @@ from web_parser.socks5_relay import responds_to_socks5_greeting
 
 
 _NAVIGATION_TIMEOUT_MS = 30_000
+# Playwright can leave the API name blank while retaining the colon separator.
+_NAVIGATION_ERROR_PREFIX = r"(?:(?:Page\.goto)?:[ \t]*)?"
 _PROXY_CONNECTION_ERROR = re.compile(
-    r"^(?:Page\.goto: )?(?:net::ERR_PROXY_CONNECTION_FAILED|NS_ERROR_PROXY_CONNECTION_REFUSED)(?:\s|$)"
+    rf"^{_NAVIGATION_ERROR_PREFIX}(?:net::ERR_PROXY_CONNECTION_FAILED|NS_ERROR_PROXY_CONNECTION_REFUSED)(?:\s|$)"
 )
-_SOCKS_CONNECTION_ERROR = re.compile(r"^(?:Page\.goto: )?net::ERR_SOCKS_CONNECTION_FAILED(?:\s|$)")
+_SOCKS_CONNECTION_ERROR = re.compile(
+    rf"^{_NAVIGATION_ERROR_PREFIX}net::ERR_SOCKS_CONNECTION_FAILED(?:\s|$)"
+)
 _HTTP_RESPONSE_CODE_FAILURE = "net::ERR_HTTP_RESPONSE_CODE_FAILURE"
 _PROXY_CONNECT_TIMEOUT_SECONDS = 2
 
